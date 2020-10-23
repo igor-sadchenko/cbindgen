@@ -1,9 +1,10 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
+#include <ostream>
 #include <new>
 
-template<typename T>
+template<typename T = void>
 struct Bar;
 
 template<typename T>

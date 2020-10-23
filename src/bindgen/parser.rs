@@ -2,12 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path as FilePath, PathBuf as FilePathBuf};
-
-use syn;
 
 use crate::bindgen::bitflags;
 use crate::bindgen::cargo::{Cargo, PackageRef};
@@ -17,7 +16,7 @@ use crate::bindgen::ir::{
     AnnotationSet, Cfg, Constant, Documentation, Enum, Function, GenericParams, ItemMap,
     OpaqueItem, Path, Static, Struct, Type, Typedef, Union,
 };
-use crate::bindgen::utilities::{SynAbiHelpers, SynItemFnHelpers, SynItemHelpers};
+use crate::bindgen::utilities::{SynAbiHelpers, SynAttributeHelpers, SynItemFnHelpers};
 
 const STD_CRATES: &[&str] = &[
     "std",
@@ -55,7 +54,7 @@ pub fn parse_src(src_file: &FilePath, config: &Config) -> ParseResult {
         version: None,
     };
 
-    context.parse_mod(&pkg_ref, src_file)?;
+    context.parse_mod(&pkg_ref, src_file, 0)?;
     Ok(context.out)
 }
 
@@ -97,6 +96,9 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    // TODO: Change the Vec::contains calls to .iter().any() or something
+    // else that allows to use a &str instead of a &String
+    #[allow(clippy::ptr_arg)]
     fn should_parse_dependency(&self, pkg_name: &String) -> bool {
         if self.parsed_crates.contains(pkg_name) {
             return false;
@@ -114,6 +116,7 @@ impl<'a> Parser<'a> {
         // If we have a whitelist, check it
         if let Some(ref include) = self.config.parse.include {
             if !include.contains(&pkg_name) {
+                debug!("Excluding crate {}", pkg_name);
                 return false;
             }
         }
@@ -124,6 +127,7 @@ impl<'a> Parser<'a> {
 
     fn parse_crate(&mut self, pkg: &PackageRef) -> Result<(), Error> {
         assert!(self.lib.is_some());
+        debug!("Parsing crate {}", pkg.name);
         self.parsed_crates.insert(pkg.name.clone());
 
         // Check if we should use cargo expand for this crate
@@ -136,7 +140,7 @@ impl<'a> Parser<'a> {
             let crate_src = self.lib.as_ref().unwrap().find_crate_src(pkg);
 
             match crate_src {
-                Some(crate_src) => self.parse_mod(pkg, crate_src.as_path())?,
+                Some(crate_src) => self.parse_mod(pkg, crate_src.as_path(), 0)?,
                 None => {
                     // This should be an error, but is common enough to just elicit a warning
                     warn!(
@@ -176,7 +180,7 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
 
-        let mod_parsed = {
+        let mod_items = {
             if !self.cache_expanded_crate.contains_key(&pkg.name) {
                 let s = self
                     .lib
@@ -200,53 +204,23 @@ impl<'a> Parser<'a> {
             self.cache_expanded_crate.get(&pkg.name).unwrap().clone()
         };
 
-        self.process_expanded_mod(pkg, &mod_parsed)
+        self.process_mod(pkg, None, &mod_items, 0)
     }
 
-    fn process_expanded_mod(&mut self, pkg: &PackageRef, items: &[syn::Item]) -> Result<(), Error> {
-        self.out.load_syn_crate_mod(
-            &self.config,
-            &self.binding_crate_name,
-            &pkg.name,
-            Cfg::join(&self.cfg_stack).as_ref(),
-            items,
-        );
-
-        for item in items {
-            if item.has_test_attr() {
-                continue;
-            }
-            if let syn::Item::Mod(ref item) = *item {
-                let cfg = Cfg::load(&item.attrs);
-                if let Some(ref cfg) = cfg {
-                    self.cfg_stack.push(cfg.clone());
-                }
-
-                if let Some((_, ref inline_items)) = item.content {
-                    self.process_expanded_mod(pkg, inline_items)?;
-                } else {
-                    unreachable!();
-                }
-
-                if cfg.is_some() {
-                    self.cfg_stack.pop();
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn parse_mod(&mut self, pkg: &PackageRef, mod_path: &FilePath) -> Result<(), Error> {
-        let mod_parsed = {
-            let owned_mod_path = mod_path.to_path_buf();
-
-            if !self.cache_src.contains_key(&owned_mod_path) {
+    fn parse_mod(
+        &mut self,
+        pkg: &PackageRef,
+        mod_path: &FilePath,
+        depth: usize,
+    ) -> Result<(), Error> {
+        let mod_items = match self.cache_src.entry(mod_path.to_path_buf()) {
+            Entry::Vacant(vacant_entry) => {
                 let mut s = String::new();
                 let mut f = File::open(mod_path).map_err(|_| Error::ParseCannotOpenFile {
                     crate_name: pkg.name.clone(),
                     src_path: mod_path.to_str().unwrap().to_owned(),
                 })?;
+
                 f.read_to_string(&mut s)
                     .map_err(|_| Error::ParseCannotOpenFile {
                         crate_name: pkg.name.clone(),
@@ -255,28 +229,42 @@ impl<'a> Parser<'a> {
 
                 let i = syn::parse_file(&s).map_err(|x| Error::ParseSyntaxError {
                     crate_name: pkg.name.clone(),
-                    src_path: owned_mod_path.to_string_lossy().into(),
+                    src_path: mod_path.to_string_lossy().into(),
                     error: x,
                 })?;
 
-                self.cache_src.insert(owned_mod_path.clone(), i.items);
+                vacant_entry.insert(i.items).clone()
             }
-
-            self.cache_src.get(&owned_mod_path).unwrap().clone()
+            Entry::Occupied(occupied_entry) => occupied_entry.get().clone(),
         };
 
-        let mod_dir = mod_path.parent().unwrap();
+        // Compute module directory according to Rust 2018 rules
+        let mod_dir_2018;
 
-        self.process_mod(pkg, mod_dir, &mod_parsed)
+        let mod_dir = if depth == 0 || mod_path.ends_with("mod.rs") {
+            mod_path.parent().unwrap()
+        } else {
+            mod_dir_2018 = mod_path
+                .parent()
+                .unwrap()
+                .join(mod_path.file_stem().unwrap());
+            &mod_dir_2018
+        };
+
+        self.process_mod(pkg, Some(&mod_dir), &mod_items, depth)
     }
 
+    /// `mod_dir` is the path to the current directory of the module. It may be
+    /// `None` for pre-expanded modules.
     fn process_mod(
         &mut self,
         pkg: &PackageRef,
-        mod_dir: &FilePath,
+        mod_dir: Option<&FilePath>,
         items: &[syn::Item],
+        depth: usize,
     ) -> Result<(), Error> {
-        self.out.load_syn_crate_mod(
+        // We process the items first then the nested modules.
+        let nested_modules = self.out.load_syn_crate_mod(
             &self.config,
             &self.binding_crate_name,
             &pkg.name,
@@ -284,61 +272,65 @@ impl<'a> Parser<'a> {
             items,
         );
 
-        for item in items {
-            if item.has_test_attr() {
-                continue;
+        for item in nested_modules {
+            let next_mod_name = item.ident.to_string();
+
+            let cfg = Cfg::load(&item.attrs);
+            if let Some(ref cfg) = cfg {
+                self.cfg_stack.push(cfg.clone());
             }
-            if let syn::Item::Mod(ref item) = *item {
-                let next_mod_name = item.ident.to_string();
 
-                let cfg = Cfg::load(&item.attrs);
-                if let Some(ref cfg) = cfg {
-                    self.cfg_stack.push(cfg.clone());
-                }
+            if let Some((_, ref inline_items)) = item.content {
+                let next_mod_dir = mod_dir.map(|dir| dir.join(&next_mod_name));
+                self.process_mod(pkg, next_mod_dir.as_deref(), inline_items, depth)?;
+            } else if let Some(mod_dir) = mod_dir {
+                let next_mod_path1 = mod_dir.join(next_mod_name.clone() + ".rs");
+                let next_mod_path2 = mod_dir.join(next_mod_name.clone()).join("mod.rs");
 
-                if let Some((_, ref inline_items)) = item.content {
-                    self.process_mod(pkg, &mod_dir.join(&next_mod_name), inline_items)?;
+                if next_mod_path1.exists() {
+                    self.parse_mod(pkg, next_mod_path1.as_path(), depth + 1)?;
+                } else if next_mod_path2.exists() {
+                    self.parse_mod(pkg, next_mod_path2.as_path(), depth + 1)?;
                 } else {
-                    let next_mod_path1 = mod_dir.join(next_mod_name.clone() + ".rs");
-                    let next_mod_path2 = mod_dir.join(next_mod_name.clone()).join("mod.rs");
-
-                    if next_mod_path1.exists() {
-                        self.parse_mod(pkg, next_mod_path1.as_path())?;
-                    } else if next_mod_path2.exists() {
-                        self.parse_mod(pkg, next_mod_path2.as_path())?;
-                    } else {
-                        // Last chance to find a module path
-                        let mut path_attr_found = false;
-                        for attr in &item.attrs {
-                            match attr.parse_meta() {
-                                Ok(syn::Meta::NameValue(syn::MetaNameValue {
-                                    path, lit, ..
-                                })) => match lit {
-                                    syn::Lit::Str(ref path_lit) if path.is_ident("path") => {
-                                        path_attr_found = true;
-                                        self.parse_mod(pkg, &mod_dir.join(path_lit.value()))?;
-                                        break;
-                                    }
-                                    _ => (),
-                                },
+                    // Last chance to find a module path
+                    let mut path_attr_found = false;
+                    for attr in &item.attrs {
+                        if let Ok(syn::Meta::NameValue(syn::MetaNameValue { path, lit, .. })) =
+                            attr.parse_meta()
+                        {
+                            match lit {
+                                syn::Lit::Str(ref path_lit) if path.is_ident("path") => {
+                                    path_attr_found = true;
+                                    self.parse_mod(
+                                        pkg,
+                                        &mod_dir.join(path_lit.value()),
+                                        depth + 1,
+                                    )?;
+                                    break;
+                                }
                                 _ => (),
                             }
                         }
+                    }
 
-                        // This should be an error, but it's common enough to
-                        // just elicit a warning
-                        if !path_attr_found {
-                            warn!(
-                                "Parsing crate `{}`: can't find mod {}`.",
-                                pkg.name, next_mod_name
-                            );
-                        }
+                    // This should be an error, but it's common enough to
+                    // just elicit a warning
+                    if !path_attr_found {
+                        warn!(
+                            "Parsing crate `{}`: can't find mod {}`.",
+                            pkg.name, next_mod_name
+                        );
                     }
                 }
+            } else {
+                warn!(
+                    "Parsing expanded crate `{}`: can't find mod {}`.",
+                    pkg.name, next_mod_name
+                );
+            }
 
-                if cfg.is_some() {
-                    self.cfg_stack.pop();
-                }
+            if cfg.is_some() {
+                self.cfg_stack.pop();
             }
         }
 
@@ -361,13 +353,13 @@ pub struct Parse {
 impl Parse {
     pub fn new() -> Parse {
         Parse {
-            constants: ItemMap::new(),
-            globals: ItemMap::new(),
-            enums: ItemMap::new(),
-            structs: ItemMap::new(),
-            unions: ItemMap::new(),
-            opaque_items: ItemMap::new(),
-            typedefs: ItemMap::new(),
+            constants: ItemMap::default(),
+            globals: ItemMap::default(),
+            enums: ItemMap::default(),
+            structs: ItemMap::default(),
+            unions: ItemMap::default(),
+            opaque_items: ItemMap::default(),
+            typedefs: ItemMap::default(),
             functions: Vec::new(),
         }
     }
@@ -394,12 +386,14 @@ impl Parse {
         add_opaque("Option", vec!["T"]);
         add_opaque("NonNull", vec!["T"]);
         add_opaque("Vec", vec!["T"]);
-        add_opaque("HashMap", vec!["K", "V"]);
+        add_opaque("HashMap", vec!["K", "V", "Hasher"]);
         add_opaque("BTreeMap", vec!["K", "V"]);
         add_opaque("HashSet", vec!["T"]);
         add_opaque("BTreeSet", vec!["T"]);
         add_opaque("LinkedList", vec!["T"]);
         add_opaque("VecDeque", vec!["T"]);
+        add_opaque("ManuallyDrop", vec!["T"]);
+        add_opaque("MaybeUninit", vec!["T"]);
     }
 
     pub fn extend_with(&mut self, other: &Parse) {
@@ -413,18 +407,19 @@ impl Parse {
         self.functions.extend_from_slice(&other.functions);
     }
 
-    pub fn load_syn_crate_mod(
+    fn load_syn_crate_mod<'a>(
         &mut self,
         config: &Config,
         binding_crate_name: &str,
         crate_name: &str,
         mod_cfg: Option<&Cfg>,
-        items: &[syn::Item],
-    ) {
+        items: &'a [syn::Item],
+    ) -> Vec<&'a syn::ItemMod> {
         let mut impls_with_assoc_consts = Vec::new();
+        let mut nested_modules = Vec::new();
 
         for item in items {
-            if item.has_test_attr() {
+            if item.should_skip_parsing() {
                 continue;
             }
             match item {
@@ -488,6 +483,9 @@ impl Parse {
                 syn::Item::Macro(ref item) => {
                     self.load_builtin_macro(config, crate_name, mod_cfg, item)
                 }
+                syn::Item::Mod(ref item) => {
+                    nested_modules.push(item);
+                }
                 _ => {}
             }
         }
@@ -495,6 +493,8 @@ impl Parse {
         for item_impl in impls_with_assoc_consts {
             self.load_syn_assoc_consts_from_impl(crate_name, mod_cfg, item_impl)
         }
+
+        nested_modules
     }
 
     fn load_syn_assoc_consts_from_impl(
@@ -604,6 +604,7 @@ impl Parse {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn load_fn_declaration(
         &mut self,
         config: &Config,
@@ -905,14 +906,6 @@ impl Parse {
         mod_cfg: Option<&Cfg>,
         item: &syn::ItemEnum,
     ) {
-        if item.generics.lifetimes().count() > 0 {
-            info!(
-                "Skip {}::{} - (has generics or lifetimes or where bounds).",
-                crate_name, &item.ident
-            );
-            return;
-        }
-
         match Enum::load(item, mod_cfg, config) {
             Ok(en) => {
                 info!("Take {}::{}.", crate_name, &item.ident);

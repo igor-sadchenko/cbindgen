@@ -12,3 +12,5 @@ typedef struct {
 } Fns;
 
 void root(Fns _fns);
+
+void no_return(void);

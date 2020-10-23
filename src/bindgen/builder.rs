@@ -6,7 +6,7 @@ use std::path;
 
 use crate::bindgen::bindings::Bindings;
 use crate::bindgen::cargo::Cargo;
-use crate::bindgen::config::{Braces, Config, Language};
+use crate::bindgen::config::{Braces, Config, Language, Style};
 use crate::bindgen::error::Error;
 use crate::bindgen::library::Library;
 use crate::bindgen::parser::{self, Parse};
@@ -23,6 +23,7 @@ pub struct Builder {
 }
 
 impl Builder {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Builder {
         Builder {
             config: Config::default(),
@@ -61,6 +62,12 @@ impl Builder {
     }
 
     #[allow(unused)]
+    pub fn with_after_include<S: AsRef<str>>(mut self, line: S) -> Builder {
+        self.config.after_includes = Some(String::from(line.as_ref()));
+        self
+    }
+
+    #[allow(unused)]
     pub fn with_trailer<S: AsRef<str>>(mut self, trailer: S) -> Builder {
         self.config.trailer = Some(String::from(trailer.as_ref()));
         self
@@ -69,6 +76,12 @@ impl Builder {
     #[allow(unused)]
     pub fn with_include_guard<S: AsRef<str>>(mut self, include_guard: S) -> Builder {
         self.config.include_guard = Some(String::from(include_guard.as_ref()));
+        self
+    }
+
+    #[allow(unused)]
+    pub fn with_pragma_once(mut self, pragma_once: bool) -> Builder {
+        self.config.pragma_once = pragma_once;
         self
     }
 
@@ -122,6 +135,12 @@ impl Builder {
     #[allow(unused)]
     pub fn with_language(mut self, language: Language) -> Builder {
         self.config.language = language;
+        self
+    }
+
+    #[allow(unused)]
+    pub fn with_style(mut self, style: Style) -> Builder {
+        self.config.style = style;
         self
     }
 
@@ -301,23 +320,14 @@ impl Builder {
         if let Some((lib_dir, binding_lib_name)) = self.lib.clone() {
             let lockfile = self.lockfile.as_ref().and_then(|p| p.to_str());
 
-            let cargo = if let Some(binding_lib_name) = binding_lib_name {
-                Cargo::load(
-                    &lib_dir,
-                    lockfile,
-                    Some(&binding_lib_name),
-                    self.config.parse.parse_deps,
-                    self.config.parse.clean,
-                )?
-            } else {
-                Cargo::load(
-                    &lib_dir,
-                    lockfile,
-                    None,
-                    self.config.parse.parse_deps,
-                    self.config.parse.clean,
-                )?
-            };
+            let cargo = Cargo::load(
+                &lib_dir,
+                lockfile,
+                binding_lib_name.as_deref(),
+                self.config.parse.parse_deps,
+                self.config.parse.clean,
+                /* existing_metadata = */ None,
+            )?;
 
             result.extend_with(&parser::parse_lib(cargo, &self.config)?);
         } else if let Some(cargo) = self.lib_cargo.clone() {
@@ -336,5 +346,18 @@ impl Builder {
             result.functions,
         )
         .generate()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_style() {
+        assert_eq!(
+            Style::Tag,
+            Builder::new().with_style(Style::Tag).config.style
+        );
     }
 }

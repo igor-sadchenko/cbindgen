@@ -10,8 +10,6 @@ use std::{fmt, fs, path::Path as StdPath};
 use serde::de::value::{MapAccessDeserializer, SeqAccessDeserializer};
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 
-use toml;
-
 use crate::bindgen::ir::annotation::AnnotationSet;
 use crate::bindgen::ir::path::Path;
 use crate::bindgen::ir::repr::ReprAlign;
@@ -47,6 +45,61 @@ impl FromStr for Language {
 }
 
 deserialize_enum_str!(Language);
+
+/// Controls what type of line endings are used in the generated code.
+#[derive(Debug, Clone, Copy)]
+pub enum LineEndingStyle {
+    /// Use Unix-style linefeed characters
+    LF,
+    /// Use classic Mac-style carriage-return characters
+    CR,
+    /// Use Windows-style carriage-return and linefeed characters
+    CRLF,
+    /// Use the native mode for the platform: CRLF on Windows, LF everywhere else.
+    Native,
+}
+
+impl Default for LineEndingStyle {
+    fn default() -> Self {
+        LineEndingStyle::LF
+    }
+}
+
+impl LineEndingStyle {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::LF => "\n",
+            Self::CR => "\r",
+            Self::CRLF => "\r\n",
+            Self::Native => {
+                #[cfg(target_os = "windows")]
+                {
+                    Self::CRLF.as_str()
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Self::LF.as_str()
+                }
+            }
+        }
+    }
+}
+
+impl FromStr for LineEndingStyle {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_ref() {
+            "native" => Ok(Self::Native),
+            "lf" => Ok(Self::LF),
+            "crlf" => Ok(Self::CRLF),
+            "cr" => Ok(Self::CR),
+            _ => Err(format!("Unrecognized line ending style: '{}'.", s)),
+        }
+    }
+}
+
+deserialize_enum_str!(LineEndingStyle);
 
 /// A style of braces to use for generating code.
 #[derive(Debug, Clone, PartialEq)]
@@ -202,7 +255,7 @@ impl FromStr for ItemType {
 deserialize_enum_str!(ItemType);
 
 /// Type which specifies the sort order of functions
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SortKey {
     Name,
     None,
@@ -246,6 +299,20 @@ pub struct ExportConfig {
     pub item_types: Vec<ItemType>,
     /// Whether renaming overrides or extends prefixing.
     pub renaming_overrides_prefixing: bool,
+    /// Mangling configuration.
+    pub mangle: MangleConfig,
+}
+
+/// Mangling-specific configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+#[serde(default)]
+pub struct MangleConfig {
+    /// The rename rule to apply to the type names mangled.
+    pub rename_types: RenameRule,
+    /// Remove the underscores used for name mangling.
+    pub remove_underscores: bool,
 }
 
 impl ExportConfig {
@@ -312,11 +379,13 @@ pub struct FunctionConfig {
     /// The style to layout the args
     pub args: Layout,
     /// The rename rule to apply to function args
-    pub rename_args: Option<RenameRule>,
+    pub rename_args: RenameRule,
     /// An optional macro to use when generating Swift function name attributes
     pub swift_name_macro: Option<String>,
-    /// Sort key for function names
-    pub sort_by: SortKey,
+    /// Sort key for functions
+    pub sort_by: Option<SortKey>,
+    /// Optional text to output after functions which return `!`.
+    pub no_return: Option<String>,
 }
 
 impl Default for FunctionConfig {
@@ -326,9 +395,10 @@ impl Default for FunctionConfig {
             postfix: None,
             must_use: None,
             args: Layout::Auto,
-            rename_args: None,
+            rename_args: RenameRule::None,
             swift_name_macro: None,
-            sort_by: SortKey::Name,
+            sort_by: None,
+            no_return: None,
         }
     }
 }
@@ -356,7 +426,7 @@ impl FunctionConfig {
 #[serde(default)]
 pub struct StructConfig {
     /// The rename rule to apply to the name of struct fields
-    pub rename_fields: Option<RenameRule>,
+    pub rename_fields: RenameRule,
     /// Whether to generate a constructor for the struct (which takes
     /// arguments to initialize all the members)
     pub derive_constructor: bool,
@@ -372,6 +442,8 @@ pub struct StructConfig {
     pub derive_gt: bool,
     /// Whether to generate a greater than or equal to operator on structs with one field
     pub derive_gte: bool,
+    /// Whether to generate a ostream serializer for the struct
+    pub derive_ostream: bool,
     /// Whether associated constants should be in the body. Only applicable to
     /// non-transparent structs, and in C++-only.
     pub associated_constants_in_body: bool,
@@ -422,6 +494,12 @@ impl StructConfig {
         }
         self.derive_gte
     }
+    pub(crate) fn derive_ostream(&self, annotations: &AnnotationSet) -> bool {
+        if let Some(x) = annotations.bool("derive-ostream") {
+            return x;
+        }
+        self.derive_ostream
+    }
 }
 
 /// Settings to apply to generated enums.
@@ -431,7 +509,7 @@ impl StructConfig {
 #[serde(default)]
 pub struct EnumConfig {
     /// The rename rule to apply to the name of enum variants
-    pub rename_variants: Option<RenameRule>,
+    pub rename_variants: RenameRule,
     /// Whether to add a `Sentinel` value at the end of every enum
     /// This is useful in Gecko for IPC serialization
     pub add_sentinel: bool,
@@ -459,6 +537,8 @@ pub struct EnumConfig {
     /// This is only generated if a copy constructor for the same tagged enum is
     /// generated as well.
     pub derive_tagged_enum_copy_assignment: bool,
+    /// Whether to generate a ostream serializer for the struct
+    pub derive_ostream: bool,
     /// Declare the enum as an enum class.
     /// Only relevant when targeting C++.
     pub enum_class: bool,
@@ -470,7 +550,7 @@ pub struct EnumConfig {
 impl Default for EnumConfig {
     fn default() -> EnumConfig {
         EnumConfig {
-            rename_variants: None,
+            rename_variants: RenameRule::None,
             add_sentinel: false,
             prefix_with_name: false,
             derive_helper_methods: false,
@@ -481,6 +561,7 @@ impl Default for EnumConfig {
             derive_tagged_enum_destructor: false,
             derive_tagged_enum_copy_constructor: false,
             derive_tagged_enum_copy_assignment: false,
+            derive_ostream: false,
             enum_class: true,
             private_default_tagged_enum_constructor: false,
         }
@@ -530,6 +611,12 @@ impl EnumConfig {
         }
         self.derive_tagged_enum_copy_assignment
     }
+    pub(crate) fn derive_ostream(&self, annotations: &AnnotationSet) -> bool {
+        if let Some(x) = annotations.bool("derive-ostream") {
+            return x;
+        }
+        self.derive_ostream
+    }
     pub(crate) fn enum_class(&self, annotations: &AnnotationSet) -> bool {
         if let Some(x) = annotations.bool("enum-class") {
             return x;
@@ -557,6 +644,8 @@ pub struct ConstantConfig {
     pub allow_static_const: bool,
     /// Whether a generated constant should be constexpr in C++ mode.
     pub allow_constexpr: bool,
+    /// Sort key for constants
+    pub sort_by: Option<SortKey>,
 }
 
 impl Default for ConstantConfig {
@@ -564,6 +653,7 @@ impl Default for ConstantConfig {
         ConstantConfig {
             allow_static_const: true,
             allow_constexpr: false,
+            sort_by: None,
         }
     }
 }
@@ -689,6 +779,16 @@ impl ParseConfig {
     }
 }
 
+/// Settings to apply to pointers
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+#[serde(default)]
+pub struct PtrConfig {
+    /// Optional attribute to apply to pointers that are required to not be null
+    pub non_null_attribute: Option<String>,
+}
+
 /// A collection of settings to customize the generated bindings.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -701,10 +801,14 @@ pub struct Config {
     pub includes: Vec<String>,
     /// A list of additional system includes to put at the beginning of the generated header
     pub sys_includes: Vec<String>,
+    /// Optional verbatim code added after the include blocks
+    pub after_includes: Option<String>,
     /// Optional text to output at the end of the file
     pub trailer: Option<String>,
     /// Optional name to use for an include guard
     pub include_guard: Option<String>,
+    /// Add a `#pragma once` guard
+    pub pragma_once: bool,
     /// Generates no includes at all. Overrides all other include options
     ///
     /// This option is useful when using cbindgen with tools such as python's cffi which
@@ -726,12 +830,16 @@ pub struct Config {
     pub line_length: usize,
     /// The amount of spaces in a tab
     pub tab_width: usize,
+    /// The type of line endings to generate
+    pub line_endings: LineEndingStyle,
     /// The language to output bindings for
     pub language: Language,
     /// Include preprocessor defines in C bindings to ensure C++ compatibility
     pub cpp_compat: bool,
     /// The style to declare structs, enums and unions in for C
     pub style: Style,
+    /// Default sort key for functions and constants.
+    pub sort_by: SortKey,
     /// The configuration options for parsing
     pub parse: ParseConfig,
     /// The configuration options for exporting
@@ -758,6 +866,9 @@ pub struct Config {
     pub documentation: bool,
     /// How documentation comments should be styled.
     pub documentation_style: DocumentationStyle,
+    /// Configuration options for pointers
+    #[serde(rename = "ptr")]
+    pub pointer: PtrConfig,
 }
 
 impl Default for Config {
@@ -766,8 +877,10 @@ impl Default for Config {
             header: None,
             includes: Vec::new(),
             sys_includes: Vec::new(),
+            after_includes: None,
             trailer: None,
             include_guard: None,
+            pragma_once: false,
             autogen_warning: None,
             include_version: false,
             no_includes: false,
@@ -777,9 +890,11 @@ impl Default for Config {
             braces: Braces::SameLine,
             line_length: 100,
             tab_width: 2,
+            line_endings: LineEndingStyle::default(),
             language: Language::Cxx,
             cpp_compat: false,
             style: Style::Type,
+            sort_by: SortKey::None,
             macro_expansion: Default::default(),
             parse: ParseConfig::default(),
             export: ExportConfig::default(),
@@ -791,17 +906,18 @@ impl Default for Config {
             defines: HashMap::new(),
             documentation: true,
             documentation_style: DocumentationStyle::Auto,
+            pointer: PtrConfig::default(),
         }
     }
 }
 
 impl Config {
     pub fn from_file<P: AsRef<StdPath>>(file_name: P) -> Result<Config, String> {
-        let config_text = fs::read_to_string(file_name.as_ref()).or_else(|_| {
-            Err(format!(
+        let config_text = fs::read_to_string(file_name.as_ref()).map_err(|_| {
+            format!(
                 "Couldn't open config file: {}.",
                 file_name.as_ref().display()
-            ))
+            )
         })?;
 
         match toml::from_str::<Config>(&config_text) {

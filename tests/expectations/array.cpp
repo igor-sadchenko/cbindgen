@@ -1,6 +1,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
+#include <ostream>
 #include <new>
 
 struct Foo {
@@ -17,10 +18,10 @@ struct Foo {
     A_Body a;
   };
 
-  static Foo A(const float (&a0)[20]) {
+  static Foo A(const float (&_0)[20]) {
     Foo result;
     for (int i = 0; i < 20; i++) {
-      ::new (&result.a._0[i]) (float)(a0[i]);
+      ::new (&result.a._0[i]) (float)(_0[i]);
     }
     result.tag = Tag::A;
     return result;

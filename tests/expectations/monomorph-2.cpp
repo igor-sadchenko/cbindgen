@@ -1,6 +1,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
+#include <ostream>
 #include <new>
 
 struct A;
@@ -15,8 +16,8 @@ struct List {
 
 extern "C" {
 
-void bar(List<B> b);
-
 void foo(List<A> a);
+
+void bar(List<B> b);
 
 } // extern "C"

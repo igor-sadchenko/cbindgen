@@ -1,6 +1,6 @@
 [package]
 name = "cbindgen"
-version = "0.14.0"
+version = "0.15.0"
 authors = ["Jeff Muizelaar <jmuizelaar@mozilla.com>",
            "Kartikaya Gupta <kats@mozilla.com>",
            "Ryan Hunt <rhunt@eqrion.net>"]
@@ -16,16 +16,18 @@ travis-ci = { repository = "eqrion/cbindgen" }
 
 [dependencies]
 clap = { version = "2", optional = true }
+indexmap = "1"
 log = "0.4"
-serde = { version = "1.0", default-features = false, features = ["derive"]}
+serde = { version = "1.0.103", default-features = false, features = ["derive"]}
 serde_json = "1.0"
 tempfile = "3.0"
 toml = "0.5"
 proc-macro2 = "1"
 quote = "1"
+heck = "0.3"
 
 [dependencies.syn]
-version = "1"
+version = "1.0.3"
 default-features = false
 features = ["clone-impls", "extra-traits", "full", "parsing", "printing"]
 

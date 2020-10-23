@@ -1,6 +1,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
+#include <ostream>
 #include <new>
 
 struct Foo {
@@ -9,9 +10,9 @@ struct Foo {
 
 extern "C" {
 
-void cbindgen();
-
 void extra_debug_fn();
+
+void cbindgen();
 
 void root(Foo a);
 

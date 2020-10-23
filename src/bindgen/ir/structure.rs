@@ -4,8 +4,6 @@
 
 use std::io::Write;
 
-use syn;
-
 use crate::bindgen::config::{Config, Language, LayoutConfig};
 use crate::bindgen::declarationtyperesolver::DeclarationTypeResolver;
 use crate::bindgen::dependencies::Dependencies;
@@ -18,7 +16,7 @@ use crate::bindgen::mangle;
 use crate::bindgen::monomorph::Monomorphs;
 use crate::bindgen::rename::{IdentifierType, RenameRule};
 use crate::bindgen::reserved;
-use crate::bindgen::utilities::{find_first_some, IterHelpers};
+use crate::bindgen::utilities::IterHelpers;
 use crate::bindgen::writer::{ListType, Source, SourceWriter};
 
 #[derive(Debug, Clone)]
@@ -113,6 +111,7 @@ impl Struct {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         path: Path,
         generic_params: GenericParams,
@@ -144,9 +143,9 @@ impl Struct {
         }
     }
 
-    pub fn simplify_standard_types(&mut self) {
+    pub fn simplify_standard_types(&mut self, config: &Config) {
         for &mut (_, ref mut ty, _) in &mut self.fields {
-            ty.simplify_standard_types();
+            ty.simplify_standard_types(config);
         }
     }
 
@@ -172,8 +171,13 @@ impl Struct {
         }
     }
 
-    pub fn specialize(&self, generic_values: &[Type], mappings: &[(&Path, &Type)]) -> Self {
-        let mangled_path = mangle::mangle_path(&self.path, generic_values);
+    pub fn specialize(
+        &self,
+        generic_values: &[Type],
+        mappings: &[(&Path, &Type)],
+        config: &Config,
+    ) -> Self {
+        let mangled_path = mangle::mangle_path(&self.path, generic_values, &config.export.mangle);
         Struct::new(
             mangled_path,
             GenericParams::default(),
@@ -299,18 +303,18 @@ impl Item for Struct {
         {
             let mut names = self.fields.iter_mut().map(|field| &mut field.0);
 
-            let field_rules = [
-                self.annotations.parse_atom::<RenameRule>("rename-all"),
-                config.structure.rename_fields,
-            ];
+            let field_rules = self
+                .annotations
+                .parse_atom::<RenameRule>("rename-all")
+                .unwrap_or(config.structure.rename_fields);
 
             if let Some(o) = self.annotations.list("field-names") {
                 for (dest, src) in names.zip(o) {
                     *dest = src;
                 }
-            } else if let Some(r) = find_first_some(&field_rules) {
+            } else if let Some(r) = field_rules.not_none() {
                 for name in names {
-                    *name = r.apply_to_snake_case(name, IdentifierType::StructMember);
+                    *name = r.apply(name, IdentifierType::StructMember).into_owned();
                 }
             } else if self.tuple_struct {
                 // If there is a tag field, skip it
@@ -377,7 +381,7 @@ impl Item for Struct {
             .zip(generic_values.iter())
             .collect::<Vec<_>>();
 
-        let monomorph = self.specialize(generic_values, &mappings);
+        let monomorph = self.specialize(generic_values, &mappings, library.get_config());
 
         // Instantiate any monomorphs for any generic paths we may have just created.
         monomorph.add_monomorphs(library, out);
@@ -487,9 +491,8 @@ impl Source for Struct {
                     config
                         .function
                         .rename_args
-                        .as_ref()
-                        .unwrap_or(&RenameRule::GeckoCase)
-                        .apply_to_snake_case(name, IdentifierType::FunctionArg)
+                        .apply(name, IdentifierType::FunctionArg)
+                        .into_owned()
                 };
                 write!(out, "{}(", self.export_name());
                 let vec: Vec<_> = self
@@ -515,11 +518,10 @@ impl Source for Struct {
                 out.new_line();
             }
 
-            let other = if let Some(r) = config.function.rename_args {
-                r.apply_to_snake_case("other", IdentifierType::FunctionArg)
-            } else {
-                String::from("other")
-            };
+            let other = config
+                .function
+                .rename_args
+                .apply("other", IdentifierType::FunctionArg);
 
             if self
                 .annotations
@@ -547,65 +549,117 @@ impl Source for Struct {
                 self.emit_bitflags_binop('^', &other, out);
             }
 
-            let skip_fields = if self.is_tagged { 1 } else { 0 };
-
-            let mut emit_op = |op, conjuc| {
+            // Generate a serializer function that allows dumping this struct
+            // to an std::ostream. It's defined as a friend function inside the
+            // struct definition, and doesn't need the `inline` keyword even
+            // though it's implemented right in the generated header file.
+            if config.structure.derive_ostream(&self.annotations) {
                 if !wrote_start_newline {
                     wrote_start_newline = true;
                     out.new_line();
                 }
 
                 out.new_line();
-
+                let stream = config
+                    .function
+                    .rename_args
+                    .apply("stream", IdentifierType::FunctionArg);
+                let instance = config
+                    .function
+                    .rename_args
+                    .apply("instance", IdentifierType::FunctionArg);
                 write!(
                     out,
-                    "bool operator{}(const {}& {}) const",
-                    op,
+                    "friend std::ostream& operator<<(std::ostream& {}, const {}& {})",
+                    stream,
                     self.export_name(),
-                    other
+                    instance,
                 );
                 out.open_brace();
-                out.write("return ");
+                write!(out, "return {} << \"{{ \"", stream);
                 let vec: Vec<_> = self
                     .fields
                     .iter()
-                    .skip(skip_fields)
-                    .map(|x| format!("{} {} {}.{}", x.0, op, other, x.0))
+                    .map(|x| format!(" << \"{}=\" << {}.{}", x.0, instance, x.0))
                     .collect();
-                out.write_vertical_source_list(&vec[..], ListType::Join(&format!(" {}", conjuc)));
-                out.write(";");
+                out.write_vertical_source_list(&vec[..], ListType::Join(" << \", \""));
+                out.write(" << \" }\";");
                 out.close_brace(false);
+            }
+
+            let skip_fields = if self.is_tagged { 1 } else { 0 };
+
+            macro_rules! emit_op {
+                ($op_name:expr, $op:expr, $conjuc:expr) => {{
+                    if !wrote_start_newline {
+                        #[allow(unused_assignments)]
+                        {
+                            wrote_start_newline = true;
+                        }
+                        out.new_line();
+                    }
+
+                    out.new_line();
+
+                    if let Some(Some(attrs)) =
+                        self.annotations.atom(concat!($op_name, "-attributes"))
+                    {
+                        write!(out, "{} ", attrs);
+                    }
+
+                    write!(
+                        out,
+                        "bool operator{}(const {}& {}) const",
+                        $op,
+                        self.export_name(),
+                        other
+                    );
+                    out.open_brace();
+                    out.write("return ");
+                    let vec: Vec<_> = self
+                        .fields
+                        .iter()
+                        .skip(skip_fields)
+                        .map(|x| format!("{} {} {}.{}", x.0, $op, other, x.0))
+                        .collect();
+                    out.write_vertical_source_list(
+                        &vec[..],
+                        ListType::Join(&format!(" {}", $conjuc)),
+                    );
+                    out.write(";");
+                    out.close_brace(false);
+                }};
             };
 
             if config.structure.derive_eq(&self.annotations) && self.can_derive_eq() {
-                emit_op("==", "&&");
+                emit_op!("eq", "==", "&&");
             }
             if config.structure.derive_neq(&self.annotations) && self.can_derive_eq() {
-                emit_op("!=", "||");
+                emit_op!("neq", "!=", "||");
             }
             if config.structure.derive_lt(&self.annotations)
                 && self.fields.len() == 1
                 && self.fields[0].1.can_cmp_order()
             {
-                emit_op("<", "&&");
+                emit_op!("lt", "<", "&&");
             }
             if config.structure.derive_lte(&self.annotations)
                 && self.fields.len() == 1
                 && self.fields[0].1.can_cmp_order()
             {
-                emit_op("<=", "&&");
+                emit_op!("lte", "<=", "&&");
             }
             if config.structure.derive_gt(&self.annotations)
                 && self.fields.len() == 1
                 && self.fields[0].1.can_cmp_order()
             {
-                emit_op(">", "&&");
+                emit_op!("gt", ">", "&&");
             }
             if config.structure.derive_gte(&self.annotations)
                 && self.fields.len() == 1
                 && self.fields[0].1.can_cmp_order()
             {
-                emit_op(">=", "&&");
+                emit_op!("gte", ">=", "&&");
             }
         }
 

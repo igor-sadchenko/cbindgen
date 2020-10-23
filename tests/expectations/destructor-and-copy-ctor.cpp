@@ -1,6 +1,11 @@
+#define NOINLINE __attribute__((noinline))
+#define NODISCARD [[nodiscard]]
+
+
 #include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
+#include <ostream>
 #include <new>
 
 enum class FillRule : uint8_t {
@@ -75,9 +80,9 @@ struct Foo {
     return tag == Tag::Bar;
   }
 
-  static Foo Polygon1(const Polygon<T> &a0) {
+  static Foo Polygon1(const Polygon<T> &_0) {
     Foo result;
-    ::new (&result.polygon1._0) (Polygon<T>)(a0);
+    ::new (&result.polygon1._0) (Polygon<T>)(_0);
     result.tag = Tag::Polygon1;
     return result;
   }
@@ -86,9 +91,9 @@ struct Foo {
     return tag == Tag::Polygon1;
   }
 
-  static Foo Slice1(const OwnedSlice<T> &a0) {
+  static Foo Slice1(const OwnedSlice<T> &_0) {
     Foo result;
-    ::new (&result.slice1._0) (OwnedSlice<T>)(a0);
+    ::new (&result.slice1._0) (OwnedSlice<T>)(_0);
     result.tag = Tag::Slice1;
     return result;
   }
@@ -97,9 +102,9 @@ struct Foo {
     return tag == Tag::Slice1;
   }
 
-  static Foo Slice2(const OwnedSlice<int32_t> &a0) {
+  static Foo Slice2(const OwnedSlice<int32_t> &_0) {
     Foo result;
-    ::new (&result.slice2._0) (OwnedSlice<int32_t>)(a0);
+    ::new (&result.slice2._0) (OwnedSlice<int32_t>)(_0);
     result.tag = Tag::Slice2;
     return result;
   }
@@ -108,11 +113,11 @@ struct Foo {
     return tag == Tag::Slice2;
   }
 
-  static Foo Slice3(const FillRule &aFill,
-                    const OwnedSlice<T> &aCoords) {
+  static Foo Slice3(const FillRule &fill,
+                    const OwnedSlice<T> &coords) {
     Foo result;
-    ::new (&result.slice3.fill) (FillRule)(aFill);
-    ::new (&result.slice3.coords) (OwnedSlice<T>)(aCoords);
+    ::new (&result.slice3.fill) (FillRule)(fill);
+    ::new (&result.slice3.coords) (OwnedSlice<T>)(coords);
     result.tag = Tag::Slice3;
     return result;
   }
@@ -121,11 +126,11 @@ struct Foo {
     return tag == Tag::Slice3;
   }
 
-  static Foo Slice4(const FillRule &aFill,
-                    const OwnedSlice<int32_t> &aCoords) {
+  static Foo Slice4(const FillRule &fill,
+                    const OwnedSlice<int32_t> &coords) {
     Foo result;
-    ::new (&result.slice4.fill) (FillRule)(aFill);
-    ::new (&result.slice4.coords) (OwnedSlice<int32_t>)(aCoords);
+    ::new (&result.slice4.fill) (FillRule)(fill);
+    ::new (&result.slice4.coords) (OwnedSlice<int32_t>)(coords);
     result.tag = Tag::Slice4;
     return result;
   }
@@ -229,9 +234,9 @@ union Baz {
     return tag == Tag::Bar2;
   }
 
-  static Baz Polygon21(const Polygon<T> &a0) {
+  static Baz Polygon21(const Polygon<T> &_0) {
     Baz result;
-    ::new (&result.polygon21._0) (Polygon<T>)(a0);
+    ::new (&result.polygon21._0) (Polygon<T>)(_0);
     result.tag = Tag::Polygon21;
     return result;
   }
@@ -240,9 +245,9 @@ union Baz {
     return tag == Tag::Polygon21;
   }
 
-  static Baz Slice21(const OwnedSlice<T> &a0) {
+  static Baz Slice21(const OwnedSlice<T> &_0) {
     Baz result;
-    ::new (&result.slice21._0) (OwnedSlice<T>)(a0);
+    ::new (&result.slice21._0) (OwnedSlice<T>)(_0);
     result.tag = Tag::Slice21;
     return result;
   }
@@ -251,9 +256,9 @@ union Baz {
     return tag == Tag::Slice21;
   }
 
-  static Baz Slice22(const OwnedSlice<int32_t> &a0) {
+  static Baz Slice22(const OwnedSlice<int32_t> &_0) {
     Baz result;
-    ::new (&result.slice22._0) (OwnedSlice<int32_t>)(a0);
+    ::new (&result.slice22._0) (OwnedSlice<int32_t>)(_0);
     result.tag = Tag::Slice22;
     return result;
   }
@@ -262,11 +267,11 @@ union Baz {
     return tag == Tag::Slice22;
   }
 
-  static Baz Slice23(const FillRule &aFill,
-                     const OwnedSlice<T> &aCoords) {
+  static Baz Slice23(const FillRule &fill,
+                     const OwnedSlice<T> &coords) {
     Baz result;
-    ::new (&result.slice23.fill) (FillRule)(aFill);
-    ::new (&result.slice23.coords) (OwnedSlice<T>)(aCoords);
+    ::new (&result.slice23.fill) (FillRule)(fill);
+    ::new (&result.slice23.coords) (OwnedSlice<T>)(coords);
     result.tag = Tag::Slice23;
     return result;
   }
@@ -275,11 +280,11 @@ union Baz {
     return tag == Tag::Slice23;
   }
 
-  static Baz Slice24(const FillRule &aFill,
-                     const OwnedSlice<int32_t> &aCoords) {
+  static Baz Slice24(const FillRule &fill,
+                     const OwnedSlice<int32_t> &coords) {
     Baz result;
-    ::new (&result.slice24.fill) (FillRule)(aFill);
-    ::new (&result.slice24.coords) (OwnedSlice<int32_t>)(aCoords);
+    ::new (&result.slice24.fill) (FillRule)(fill);
+    ::new (&result.slice24.coords) (OwnedSlice<int32_t>)(coords);
     result.tag = Tag::Slice24;
     return result;
   }
@@ -359,9 +364,9 @@ union Taz {
     return tag == Tag::Bar3;
   }
 
-  static Taz Taz1(const int32_t &a0) {
+  static Taz Taz1(const int32_t &_0) {
     Taz result;
-    ::new (&result.taz1._0) (int32_t)(a0);
+    ::new (&result.taz1._0) (int32_t)(_0);
     result.tag = Tag::Taz1;
     return result;
   }
@@ -370,9 +375,9 @@ union Taz {
     return tag == Tag::Taz1;
   }
 
-  static Taz Taz3(const OwnedSlice<int32_t> &a0) {
+  static Taz Taz3(const OwnedSlice<int32_t> &_0) {
     Taz result;
-    ::new (&result.taz3._0) (OwnedSlice<int32_t>)(a0);
+    ::new (&result.taz3._0) (OwnedSlice<int32_t>)(_0);
     result.tag = Tag::Taz3;
     return result;
   }
@@ -439,9 +444,9 @@ union Tazz {
     return tag == Tag::Bar4;
   }
 
-  static Tazz Taz2(const int32_t &a0) {
+  static Tazz Taz2(const int32_t &_0) {
     Tazz result;
-    ::new (&result.taz2._0) (int32_t)(a0);
+    ::new (&result.taz2._0) (int32_t)(_0);
     result.tag = Tag::Taz2;
     return result;
   }
@@ -484,9 +489,9 @@ union Tazzz {
     return tag == Tag::Bar5;
   }
 
-  static Tazzz Taz5(const int32_t &a0) {
+  static Tazzz Taz5(const int32_t &_0) {
     Tazzz result;
-    ::new (&result.taz5._0) (int32_t)(a0);
+    ::new (&result.taz5._0) (int32_t)(_0);
     result.tag = Tag::Taz5;
     return result;
   }
@@ -540,9 +545,9 @@ union Tazzzz {
   Taz6_Body taz6;
   Taz7_Body taz7;
 
-  static Tazzzz Taz6(const int32_t &a0) {
+  static Tazzzz Taz6(const int32_t &_0) {
     Tazzzz result;
-    ::new (&result.taz6._0) (int32_t)(a0);
+    ::new (&result.taz6._0) (int32_t)(_0);
     result.tag = Tag::Taz6;
     return result;
   }
@@ -551,9 +556,9 @@ union Tazzzz {
     return tag == Tag::Taz6;
   }
 
-  static Tazzzz Taz7(const uint32_t &a0) {
+  static Tazzzz Taz7(const uint32_t &_0) {
     Tazzzz result;
-    ::new (&result.taz7._0) (uint32_t)(a0);
+    ::new (&result.taz7._0) (uint32_t)(_0);
     result.tag = Tag::Taz7;
     return result;
   }
@@ -594,6 +599,106 @@ union Tazzzz {
   }
 };
 
+union Qux {
+  enum class Tag : uint8_t {
+    Qux1,
+    Qux2,
+  };
+
+  struct Qux1_Body {
+    Tag tag;
+    int32_t _0;
+
+    bool operator==(const Qux1_Body& other) const {
+      return _0 == other._0;
+    }
+  };
+
+  struct Qux2_Body {
+    Tag tag;
+    uint32_t _0;
+
+    bool operator==(const Qux2_Body& other) const {
+      return _0 == other._0;
+    }
+  };
+
+  struct {
+    Tag tag;
+  };
+  Qux1_Body qux1;
+  Qux2_Body qux2;
+
+  static Qux Qux1(const int32_t &_0) {
+    Qux result;
+    ::new (&result.qux1._0) (int32_t)(_0);
+    result.tag = Tag::Qux1;
+    return result;
+  }
+
+  bool IsQux1() const {
+    return tag == Tag::Qux1;
+  }
+
+  static Qux Qux2(const uint32_t &_0) {
+    Qux result;
+    ::new (&result.qux2._0) (uint32_t)(_0);
+    result.tag = Tag::Qux2;
+    return result;
+  }
+
+  bool IsQux2() const {
+    return tag == Tag::Qux2;
+  }
+
+  NODISCARD bool operator==(const Qux& other) const {
+    if (tag != other.tag) {
+      return false;
+    }
+    switch (tag) {
+      case Tag::Qux1: return qux1 == other.qux1;
+      case Tag::Qux2: return qux2 == other.qux2;
+
+    }
+    return true;
+  }
+
+  NODISCARD bool operator!=(const Qux& other) const {
+    return !(*this == other);
+  }
+
+  private:
+  Qux() {
+
+  }
+  public:
+
+
+  NOINLINE ~Qux() {
+    switch (tag) {
+      case Tag::Qux1: qux1.~Qux1_Body(); break;
+      case Tag::Qux2: qux2.~Qux2_Body(); break;
+
+    }
+  }
+
+  NOINLINE Qux(const Qux& other)
+   : tag(other.tag) {
+    switch (tag) {
+      case Tag::Qux1: ::new (&qux1) (Qux1_Body)(other.qux1); break;
+      case Tag::Qux2: ::new (&qux2) (Qux2_Body)(other.qux2); break;
+
+    }
+  }
+  NOINLINE Qux& operator=(const Qux& other) {
+    if (this != &other) {
+      this->~Qux();
+      new (this) Qux(other);
+    }
+    return *this;
+  }
+};
+
 extern "C" {
 
 void root(const Foo<uint32_t> *a,
@@ -601,6 +706,7 @@ void root(const Foo<uint32_t> *a,
           const Taz *c,
           Tazz d,
           const Tazzz *e,
-          const Tazzzz *f);
+          const Tazzzz *f,
+          const Qux *g);
 
 } // extern "C"

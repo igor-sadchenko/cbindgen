@@ -4,8 +4,6 @@
 
 use std::io::Write;
 
-use syn;
-
 use crate::bindgen::config::{Config, Language, LayoutConfig};
 use crate::bindgen::declarationtyperesolver::DeclarationTypeResolver;
 use crate::bindgen::dependencies::Dependencies;
@@ -18,7 +16,7 @@ use crate::bindgen::library::Library;
 use crate::bindgen::mangle;
 use crate::bindgen::monomorph::Monomorphs;
 use crate::bindgen::rename::{IdentifierType, RenameRule};
-use crate::bindgen::utilities::{find_first_some, IterHelpers};
+use crate::bindgen::utilities::IterHelpers;
 use crate::bindgen::writer::{ListType, Source, SourceWriter};
 
 #[derive(Debug, Clone)]
@@ -73,6 +71,7 @@ impl Union {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         path: Path,
         generic_params: GenericParams,
@@ -97,9 +96,9 @@ impl Union {
         }
     }
 
-    pub fn simplify_standard_types(&mut self) {
+    pub fn simplify_standard_types(&mut self, config: &Config) {
         for &mut (_, ref mut ty, _) in &mut self.fields {
-            ty.simplify_standard_types();
+            ty.simplify_standard_types(config);
         }
     }
 
@@ -167,10 +166,10 @@ impl Item for Union {
             ty.rename_for_config(config, &self.generic_params);
         }
 
-        let rules = [
-            self.annotations.parse_atom::<RenameRule>("rename-all"),
-            config.structure.rename_fields,
-        ];
+        let rules = self
+            .annotations
+            .parse_atom::<RenameRule>("rename-all")
+            .unwrap_or(config.structure.rename_fields);
 
         if let Some(o) = self.annotations.list("field-names") {
             let mut overriden_fields = Vec::new();
@@ -184,13 +183,13 @@ impl Item for Union {
             }
 
             self.fields = overriden_fields;
-        } else if let Some(r) = find_first_some(&rules) {
+        } else if let Some(r) = rules.not_none() {
             self.fields = self
                 .fields
                 .iter()
                 .map(|x| {
                     (
-                        r.apply_to_snake_case(&x.0, IdentifierType::StructMember),
+                        r.apply(&x.0, IdentifierType::StructMember).into_owned(),
                         x.1.clone(),
                         x.2.clone(),
                     )
@@ -236,7 +235,12 @@ impl Item for Union {
             .zip(generic_values.iter())
             .collect::<Vec<_>>();
 
-        let mangled_path = mangle::mangle_path(&self.path, generic_values);
+        let mangled_path = mangle::mangle_path(
+            &self.path,
+            generic_values,
+            &library.get_config().export.mangle,
+        );
+
         let monomorph = Union::new(
             mangled_path,
             GenericParams::default(),

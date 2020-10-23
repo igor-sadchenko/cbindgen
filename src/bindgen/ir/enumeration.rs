@@ -4,29 +4,73 @@
 
 use std::io::Write;
 
-use syn;
-
 use crate::bindgen::config::{Config, Language};
 use crate::bindgen::declarationtyperesolver::DeclarationTypeResolver;
 use crate::bindgen::dependencies::Dependencies;
 use crate::bindgen::ir::{
-    AnnotationSet, Cfg, ConditionWrite, Documentation, GenericParams, GenericPath, Item,
-    ItemContainer, Path, Repr, ReprStyle, ReprType, Struct, ToCondition, Type,
+    AnnotationSet, AnnotationValue, Cfg, ConditionWrite, Documentation, GenericParams, GenericPath,
+    Item, ItemContainer, Path, Repr, ReprStyle, ReprType, Struct, ToCondition, Type,
 };
 use crate::bindgen::library::Library;
 use crate::bindgen::mangle;
 use crate::bindgen::monomorph::Monomorphs;
 use crate::bindgen::rename::{IdentifierType, RenameRule};
 use crate::bindgen::reserved;
-use crate::bindgen::utilities::find_first_some;
 use crate::bindgen::writer::{ListType, Source, SourceWriter};
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+pub enum VariantBody {
+    Empty(AnnotationSet),
+    Body {
+        /// The variant field / export name.
+        name: String,
+        /// The struct with all the items.
+        body: Struct,
+    },
+}
+
+impl VariantBody {
+    fn empty() -> Self {
+        Self::Empty(AnnotationSet::new())
+    }
+
+    fn annotations(&self) -> &AnnotationSet {
+        match *self {
+            Self::Empty(ref anno) => anno,
+            Self::Body { ref body, .. } => &body.annotations,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match *self {
+            Self::Empty(..) => true,
+            Self::Body { .. } => false,
+        }
+    }
+
+    fn specialize(
+        &self,
+        generic_values: &[Type],
+        mappings: &[(&Path, &Type)],
+        config: &Config,
+    ) -> Self {
+        match *self {
+            Self::Empty(ref annos) => Self::Empty(annos.clone()),
+            Self::Body { ref name, ref body } => Self::Body {
+                name: name.clone(),
+                body: body.specialize(generic_values, mappings, config),
+            },
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct EnumVariant {
     pub name: String,
     pub export_name: String,
     pub discriminant: Option<i64>,
-    pub body: Option<(String, Struct)>,
+    pub body: VariantBody,
     pub cfg: Option<Cfg>,
     pub documentation: Documentation,
 }
@@ -56,6 +100,7 @@ impl EnumVariant {
         generic_params: GenericParams,
         mod_cfg: Option<&Cfg>,
         self_path: &Path,
+        enum_annotations: &AnnotationSet,
     ) -> Result<Self, String> {
         let discriminant = match variant.discriminant {
             Some((_, ref expr)) => match value_from_expr(expr) {
@@ -98,54 +143,62 @@ impl EnumVariant {
         }
 
         let variant_cfg = Cfg::append(mod_cfg, Cfg::load(&variant.attrs));
+        let mut annotations = AnnotationSet::load(&variant.attrs)?;
+        if let Some(b) = enum_annotations.bool("derive-ostream") {
+            annotations.add_default("derive-ostream", AnnotationValue::Bool(b));
+        }
         let body = match variant.fields {
-            syn::Fields::Unit => None,
+            syn::Fields::Unit => VariantBody::Empty(annotations),
             syn::Fields::Named(ref fields) => {
                 let path = Path::new(format!("{}_Body", variant.ident));
-                Some(Struct::new(
-                    path,
-                    generic_params,
-                    parse_fields(is_tagged, &fields.named, self_path)?,
-                    is_tagged,
-                    true,
-                    None,
-                    false,
-                    false,
-                    None,
-                    AnnotationSet::load(&variant.attrs)?,
-                    Documentation::none(),
-                ))
+                let name = RenameRule::SnakeCase
+                    .apply(&variant.ident.to_string(), IdentifierType::StructMember)
+                    .into_owned();
+                VariantBody::Body {
+                    name,
+                    body: Struct::new(
+                        path,
+                        generic_params,
+                        parse_fields(is_tagged, &fields.named, self_path)?,
+                        is_tagged,
+                        true,
+                        None,
+                        false,
+                        false,
+                        None,
+                        annotations,
+                        Documentation::none(),
+                    ),
+                }
             }
             syn::Fields::Unnamed(ref fields) => {
                 let path = Path::new(format!("{}_Body", variant.ident));
-                Some(Struct::new(
-                    path,
-                    generic_params,
-                    parse_fields(is_tagged, &fields.unnamed, self_path)?,
-                    is_tagged,
-                    true,
-                    None,
-                    false,
-                    true,
-                    None,
-                    AnnotationSet::load(&variant.attrs)?,
-                    Documentation::none(),
-                ))
+                let name = RenameRule::SnakeCase
+                    .apply(&variant.ident.to_string(), IdentifierType::StructMember)
+                    .into_owned();
+                VariantBody::Body {
+                    name,
+                    body: Struct::new(
+                        path,
+                        generic_params,
+                        parse_fields(is_tagged, &fields.unnamed, self_path)?,
+                        is_tagged,
+                        true,
+                        None,
+                        false,
+                        true,
+                        None,
+                        annotations,
+                        Documentation::none(),
+                    ),
+                }
             }
         };
 
         Ok(EnumVariant::new(
             variant.ident.to_string(),
             discriminant,
-            body.map(|body| {
-                (
-                    RenameRule::SnakeCase.apply_to_pascal_case(
-                        &format!("{}", variant.ident),
-                        IdentifierType::StructMember,
-                    ),
-                    body,
-                )
-            }),
+            body,
             variant_cfg,
             Documentation::load(&variant.attrs),
         ))
@@ -154,7 +207,7 @@ impl EnumVariant {
     pub fn new(
         name: String,
         discriminant: Option<i64>,
-        body: Option<(String, Struct)>,
+        body: VariantBody,
         cfg: Option<Cfg>,
         documentation: Documentation,
     ) -> Self {
@@ -170,38 +223,41 @@ impl EnumVariant {
     }
 
     fn add_dependencies(&self, library: &Library, out: &mut Dependencies) {
-        if let Some((_, ref item)) = self.body {
-            item.add_dependencies(library, out);
+        if let VariantBody::Body { ref body, .. } = self.body {
+            body.add_dependencies(library, out);
         }
     }
 
     fn resolve_declaration_types(&mut self, resolver: &DeclarationTypeResolver) {
-        if let Some((_, ref mut ty)) = self.body {
-            ty.resolve_declaration_types(resolver);
+        if let VariantBody::Body { ref mut body, .. } = self.body {
+            body.resolve_declaration_types(resolver);
         }
     }
 
-    fn specialize(&self, generic_values: &[Type], mappings: &[(&Path, &Type)]) -> Self {
+    fn specialize(
+        &self,
+        generic_values: &[Type],
+        mappings: &[(&Path, &Type)],
+        config: &Config,
+    ) -> Self {
         Self::new(
-            mangle::mangle_name(&self.name, generic_values),
+            mangle::mangle_name(&self.name, generic_values, &config.export.mangle),
             self.discriminant,
-            self.body
-                .as_ref()
-                .map(|&(ref name, ref ty)| (name.clone(), ty.specialize(generic_values, mappings))),
+            self.body.specialize(generic_values, mappings, config),
             self.cfg.clone(),
             self.documentation.clone(),
         )
     }
 
     fn add_monomorphs(&self, library: &Library, out: &mut Monomorphs) {
-        if let Some((_, ref ty)) = self.body {
-            ty.add_monomorphs(library, out);
+        if let VariantBody::Body { ref body, .. } = self.body {
+            body.add_monomorphs(library, out);
         }
     }
 
     fn mangle_paths(&mut self, monomorphs: &Monomorphs) {
-        if let Some((_, ref mut ty)) = self.body {
-            ty.mangle_paths(monomorphs);
+        if let VariantBody::Body { ref mut body, .. } = self.body {
+            body.mangle_paths(monomorphs);
         }
     }
 }
@@ -249,11 +305,9 @@ impl Enum {
             return false;
         }
 
-        self.variants.iter().all(|variant| {
-            variant
-                .body
-                .as_ref()
-                .map_or(true, |&(_, ref body)| body.can_derive_eq())
+        self.variants.iter().all(|variant| match variant.body {
+            VariantBody::Empty(..) => true,
+            VariantBody::Body { ref body, .. } => body.can_derive_eq(),
         })
     }
 
@@ -283,6 +337,8 @@ impl Enum {
         let mut variants = Vec::new();
         let mut is_tagged = false;
 
+        let annotations = AnnotationSet::load(&item.attrs)?;
+
         for variant in item.variants.iter() {
             let variant = EnumVariant::load(
                 repr.style == ReprStyle::Rust,
@@ -290,19 +346,18 @@ impl Enum {
                 generic_params.clone(),
                 mod_cfg,
                 &path,
+                &annotations,
             )?;
-            is_tagged = is_tagged || variant.body.is_some();
+            is_tagged = is_tagged || !variant.body.is_empty();
             variants.push(variant);
         }
-
-        let annotations = AnnotationSet::load(&item.attrs)?;
 
         if let Some(names) = annotations.list("enum-trailing-values") {
             for name in names {
                 variants.push(EnumVariant::new(
                     name,
                     None,
-                    None,
+                    VariantBody::empty(),
                     None,
                     Documentation::none(),
                 ));
@@ -313,7 +368,7 @@ impl Enum {
             variants.push(EnumVariant::new(
                 "Sentinel".to_owned(),
                 None,
-                None,
+                VariantBody::empty(),
                 None,
                 Documentation::simple(" Must be last for serialization purposes"),
             ));
@@ -337,6 +392,7 @@ impl Enum {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         path: Path,
         generic_params: GenericParams,
@@ -411,7 +467,7 @@ impl Item for Enum {
             let new_tag = format!("{}_Tag", self.export_name);
             if self.repr.style == ReprStyle::Rust {
                 for variant in &mut self.variants {
-                    if let Some((_, ref mut body)) = variant.body {
+                    if let VariantBody::Body { ref mut body, .. } = variant.body {
                         let path = Path::new(new_tag.clone());
                         let generic_path = GenericPath::new(path, vec![]);
                         body.fields[0].1 = Type::Path(generic_path);
@@ -424,9 +480,13 @@ impl Item for Enum {
         for variant in &mut self.variants {
             reserved::escape(&mut variant.export_name);
 
-            if let Some((ref mut field_name, ref mut body)) = variant.body {
+            if let VariantBody::Body {
+                ref mut name,
+                ref mut body,
+            } = variant.body
+            {
                 body.rename_for_config(config);
-                reserved::escape(field_name);
+                reserved::escape(name);
             }
         }
 
@@ -435,34 +495,33 @@ impl Item for Enum {
         {
             for variant in &mut self.variants {
                 variant.export_name = format!("{}_{}", self.export_name, variant.export_name);
-                if let Some((_, ref mut body)) = variant.body {
+                if let VariantBody::Body { ref mut body, .. } = variant.body {
                     body.export_name = format!("{}_{}", self.export_name, body.export_name());
                 }
             }
         }
 
-        let rules = [
-            self.annotations.parse_atom::<RenameRule>("rename-all"),
-            config.enumeration.rename_variants,
-        ];
+        let rules = self
+            .annotations
+            .parse_atom::<RenameRule>("rename-all")
+            .unwrap_or(config.enumeration.rename_variants);
 
-        if let Some(r) = find_first_some(&rules) {
+        if let Some(r) = rules.not_none() {
             self.variants = self
                 .variants
                 .iter()
                 .map(|variant| {
                     EnumVariant::new(
-                        r.apply_to_pascal_case(
-                            &variant.export_name,
-                            IdentifierType::EnumVariant(self),
-                        ),
+                        r.apply(&variant.export_name, IdentifierType::EnumVariant(self))
+                            .into_owned(),
                         variant.discriminant,
-                        variant.body.as_ref().map(|body| {
-                            (
-                                r.apply_to_snake_case(&body.0, IdentifierType::StructMember),
-                                body.1.clone(),
-                            )
-                        }),
+                        match variant.body {
+                            VariantBody::Empty(..) => variant.body.clone(),
+                            VariantBody::Body { ref name, ref body } => VariantBody::Body {
+                                name: r.apply(&name, IdentifierType::StructMember).into_owned(),
+                                body: body.clone(),
+                            },
+                        },
                         variant.cfg.clone(),
                         variant.documentation.clone(),
                     )
@@ -497,19 +556,24 @@ impl Item for Enum {
             .collect::<Vec<_>>();
 
         for variant in &self.variants {
-            if let Some((_, ref body)) = variant.body {
+            if let VariantBody::Body { ref body, .. } = variant.body {
                 body.instantiate_monomorph(generic_values, library, out);
             }
         }
 
-        let mangled_path = mangle::mangle_path(&self.path, generic_values);
+        let mangled_path = mangle::mangle_path(
+            &self.path,
+            generic_values,
+            &library.get_config().export.mangle,
+        );
+
         let monomorph = Enum::new(
             mangled_path,
             GenericParams::default(),
             self.repr,
             self.variants
                 .iter()
-                .map(|v| v.specialize(generic_values, &mappings))
+                .map(|v| v.specialize(generic_values, &mappings, library.get_config()))
                 .collect(),
             self.tag.clone(),
             self.cfg.clone(),
@@ -655,11 +719,141 @@ impl Source for Enum {
         }
         // Done emitting the enum
 
+        // Emit an ostream function if required.
+        let derive_ostream = config.enumeration.derive_ostream(&self.annotations);
+        if config.language == Language::Cxx && derive_ostream {
+            // For untagged enums, this emits the serializer function for the
+            // enum. For tagged enums, this emits the serializer function for
+            // the tag. In the latter case we need a couple of minor changes
+            // due to the function living inside the top-level struct or enum.
+            let stream = config
+                .function
+                .rename_args
+                .apply("stream", IdentifierType::FunctionArg);
+            let instance = config
+                .function
+                .rename_args
+                .apply("instance", IdentifierType::FunctionArg);
+
+            out.new_line();
+            out.new_line();
+            // For untagged enums, we mark the function inline because the
+            // header might get included into multiple compilation units that
+            // get linked together, and not marking it inline would result in
+            // multiply-defined symbol errors. For tagged enums we don't have
+            // the same problem, but mark it as a friend function of the
+            // containing union/struct.
+            // Note also that for tagged enums, the case labels for switch
+            // statements apparently need to be qualified to the top-level
+            // generated struct or union. This is why the generated case labels
+            // below use the A::B::C format for tagged enums, with A being
+            // self.export_name(). Failure to have that qualification results
+            // in a surprising compilation failure for the generated header.
+            write!(
+                out,
+                "{} std::ostream& operator<<(std::ostream& {}, const {}& {})",
+                if is_tagged { "friend" } else { "inline" },
+                stream,
+                enum_name,
+                instance,
+            );
+
+            out.open_brace();
+            if is_tagged {
+                // C++ name resolution rules are weird.
+                write!(
+                    out,
+                    "using {} = {}::{};",
+                    enum_name,
+                    self.export_name(),
+                    enum_name
+                );
+                out.new_line();
+            }
+            write!(out, "switch ({})", instance);
+            out.open_brace();
+            let vec: Vec<_> = self
+                .variants
+                .iter()
+                .map(|x| {
+                    format!(
+                        "case {}::{}: {} << \"{}\"; break;",
+                        enum_name, x.export_name, stream, x.export_name
+                    )
+                })
+                .collect();
+            out.write_vertical_source_list(&vec[..], ListType::Join(""));
+            out.close_brace(false);
+            out.new_line();
+
+            write!(out, "return {};", stream);
+            out.close_brace(false);
+
+            if is_tagged {
+                // For tagged enums, this emits the serializer function for
+                // the top-level enum or struct.
+                out.new_line();
+                out.new_line();
+                write!(
+                    out,
+                    "friend std::ostream& operator<<(std::ostream& {}, const {}& {})",
+                    stream,
+                    self.export_name(),
+                    instance,
+                );
+
+                out.open_brace();
+
+                // C++ name resolution rules are weird.
+                write!(
+                    out,
+                    "using {} = {}::{};",
+                    enum_name,
+                    self.export_name(),
+                    enum_name
+                );
+                out.new_line();
+
+                write!(out, "switch ({}.tag)", instance);
+                out.open_brace();
+                let vec: Vec<_> = self
+                    .variants
+                    .iter()
+                    .map(|x| {
+                        let tag_str = format!("\"{}\"", x.export_name);
+                        if let VariantBody::Body { ref name, .. } = x.body {
+                            format!(
+                                "case {}::{}: {} << {}{}{}.{}; break;",
+                                enum_name,
+                                x.export_name,
+                                stream,
+                                if separate_tag { &tag_str } else { "" },
+                                if separate_tag { " << " } else { "" },
+                                instance,
+                                name,
+                            )
+                        } else {
+                            format!(
+                                "case {}::{}: {} << {}; break;",
+                                enum_name, x.export_name, stream, tag_str,
+                            )
+                        }
+                    })
+                    .collect();
+                out.write_vertical_source_list(&vec[..], ListType::Join(""));
+                out.close_brace(false);
+                out.new_line();
+
+                write!(out, "return {};", stream);
+                out.close_brace(false);
+            }
+        }
+
         // If tagged, we need to emit structs for the cases and union them together
         if is_tagged {
             // Emit the cases for the structs
             for variant in &self.variants {
-                if let Some((_, ref body)) = variant.body {
+                if let VariantBody::Body { ref body, .. } = variant.body {
                     out.new_line();
                     out.new_line();
                     let condition = variant.cfg.to_condition(config);
@@ -704,7 +898,7 @@ impl Source for Enum {
                 out.open_brace();
             }
 
-            if config.language == Language::C && !size.is_some() && !config.style.generate_typedef()
+            if config.language == Language::C && size.is_none() && !config.style.generate_typedef()
             {
                 out.write("enum ");
             }
@@ -726,8 +920,8 @@ impl Source for Enum {
                 let mut first = true;
                 for variant in &self.variants {
                     let (field_name, body) = match variant.body {
-                        Some((ref field_name, ref body)) => (field_name, body),
-                        None => continue,
+                        VariantBody::Body { ref name, ref body } => (name, body),
+                        VariantBody::Empty(..) => continue,
                     };
 
                     if !first {
@@ -767,21 +961,33 @@ impl Source for Enum {
                         config
                             .function
                             .rename_args
-                            .as_ref()
-                            .unwrap_or(&RenameRule::GeckoCase)
-                            .apply_to_snake_case(name, IdentifierType::FunctionArg)
+                            .apply(name, IdentifierType::FunctionArg)
+                            .into_owned()
                     };
 
+                    macro_rules! write_attrs {
+                        ($op:expr) => {{
+                            if let Some(Some(attrs)) = variant.body.annotations().atom(concat!(
+                                "variant-",
+                                $op,
+                                "-attributes"
+                            )) {
+                                write!(out, "{} ", attrs);
+                            }
+                        }};
+                    };
+
+                    write_attrs!("constructor");
                     write!(out, "static {} {}(", self.export_name, variant.export_name);
 
-                    if let Some((_, ref body)) = variant.body {
+                    if let VariantBody::Body { ref body, .. } = variant.body {
                         let vec: Vec<_> = body
                             .fields
                             .iter()
                             .skip(skip_fields)
                             .map(|&(ref name, ref ty, _)| {
                                 // const-ref args to constructor
-                                (arg_renamer(name), Type::Ref(Box::new(ty.clone())))
+                                (arg_renamer(name), Type::const_ref_to(ty))
                             })
                             .collect();
                         out.write_vertical_source_list(&vec[..], ListType::Join(","));
@@ -792,7 +998,11 @@ impl Source for Enum {
 
                     write!(out, "{} result;", self.export_name);
 
-                    if let Some((ref variant_name, ref body)) = variant.body {
+                    if let VariantBody::Body {
+                        name: ref variant_name,
+                        ref body,
+                    } = variant.body
+                    {
                         for &(ref field_name, ref ty, ..) in body.fields.iter().skip(skip_fields) {
                             out.new_line();
                             match ty {
@@ -832,6 +1042,7 @@ impl Source for Enum {
                     out.new_line();
                     out.new_line();
 
+                    write_attrs!("is");
                     // FIXME: create a config for method case
                     write!(out, "bool Is{}() const", variant.export_name);
                     out.open_brace();
@@ -845,8 +1056,8 @@ impl Source for Enum {
 
                     let mut derive_casts = |const_casts: bool| {
                         let (member_name, body) = match variant.body {
-                            Some((ref member_name, ref body)) => (member_name, body),
-                            None => return,
+                            VariantBody::Body { ref name, ref body } => (name, body),
+                            VariantBody::Empty(..) => return,
                         };
 
                         let field_count = body.fields.len() - skip_fields;
@@ -858,13 +1069,19 @@ impl Source for Enum {
                         out.new_line();
 
                         let dig = field_count == 1 && body.tuple_struct;
+                        if const_casts {
+                            write_attrs!("const-cast");
+                        } else {
+                            write_attrs!("mut-cast");
+                        }
                         if dig {
-                            let field = body.fields.iter().skip(skip_fields).next().unwrap();
+                            let field = body.fields.get(skip_fields).unwrap();
                             let return_type = field.1.clone();
-                            let return_type = if const_casts {
-                                Type::Ref(Box::new(return_type))
-                            } else {
-                                Type::MutRef(Box::new(return_type))
+                            let return_type = Type::Ptr {
+                                ty: Box::new(return_type),
+                                is_const: const_casts,
+                                is_ref: true,
+                                is_nullable: false,
                             };
                             return_type.write(config, out);
                         } else if const_casts {
@@ -900,10 +1117,17 @@ impl Source for Enum {
                 }
             }
 
-            let other = if let Some(r) = config.function.rename_args {
-                r.apply_to_snake_case("other", IdentifierType::FunctionArg)
-            } else {
-                String::from("other")
+            let other = config
+                .function
+                .rename_args
+                .apply("other", IdentifierType::FunctionArg);
+
+            macro_rules! write_attrs {
+                ($op:expr) => {{
+                    if let Some(Some(attrs)) = self.annotations.atom(concat!($op, "-attributes")) {
+                        write!(out, "{} ", attrs);
+                    }
+                }};
             };
 
             if config.language == Language::Cxx
@@ -912,6 +1136,7 @@ impl Source for Enum {
             {
                 out.new_line();
                 out.new_line();
+                write_attrs!("eq");
                 write!(
                     out,
                     "bool operator==(const {}& {}) const",
@@ -927,7 +1152,11 @@ impl Source for Enum {
                 out.open_brace();
                 let mut exhaustive = true;
                 for variant in &self.variants {
-                    if let Some((ref variant_name, _)) = variant.body {
+                    if let VariantBody::Body {
+                        name: ref variant_name,
+                        ..
+                    } = variant.body
+                    {
                         let condition = variant.cfg.to_condition(config);
                         condition.write_before(config, out);
                         write!(
@@ -946,14 +1175,19 @@ impl Source for Enum {
                     }
                 }
                 if !exhaustive {
-                    write!(out, "default: return true;");
+                    write!(out, "default: break;");
                 }
                 out.close_brace(false);
+
+                out.new_line();
+                write!(out, "return true;");
+
                 out.close_brace(false);
 
                 if config.structure.derive_neq(&self.annotations) {
                     out.new_line();
                     out.new_line();
+                    write_attrs!("neq");
                     write!(
                         out,
                         "bool operator!=(const {}& {}) const",
@@ -989,13 +1223,14 @@ impl Source for Enum {
             {
                 out.new_line();
                 out.new_line();
+                write_attrs!("destructor");
                 write!(out, "~{}()", self.export_name);
                 out.open_brace();
                 write!(out, "switch (tag)");
                 out.open_brace();
                 let mut exhaustive = true;
                 for variant in &self.variants {
-                    if let Some((ref variant_name, ref item)) = variant.body {
+                    if let VariantBody::Body { ref name, ref body } = variant.body {
                         let condition = variant.cfg.to_condition(config);
                         condition.write_before(config, out);
                         write!(
@@ -1003,8 +1238,8 @@ impl Source for Enum {
                             "case {}::{}: {}.~{}(); break;",
                             self.tag.as_ref().unwrap(),
                             variant.export_name,
-                            variant_name,
-                            item.export_name(),
+                            name,
+                            body.export_name(),
                         );
                         condition.write_after(config, out);
                         out.new_line();
@@ -1026,6 +1261,7 @@ impl Source for Enum {
             {
                 out.new_line();
                 out.new_line();
+                write_attrs!("copy-constructor");
                 write!(
                     out,
                     "{}(const {}& {})",
@@ -1038,7 +1274,7 @@ impl Source for Enum {
                 out.open_brace();
                 let mut exhaustive = true;
                 for variant in &self.variants {
-                    if let Some((ref variant_name, ref item)) = variant.body {
+                    if let VariantBody::Body { ref name, ref body } = variant.body {
                         let condition = variant.cfg.to_condition(config);
                         condition.write_before(config, out);
                         write!(
@@ -1046,10 +1282,10 @@ impl Source for Enum {
                             "case {}::{}: ::new (&{}) ({})({}.{}); break;",
                             self.tag.as_ref().unwrap(),
                             variant.export_name,
-                            variant_name,
-                            item.export_name(),
+                            name,
+                            body.export_name(),
                             other,
-                            variant_name,
+                            name,
                         );
                         condition.write_after(config, out);
                         out.new_line();
@@ -1069,6 +1305,7 @@ impl Source for Enum {
                         .derive_tagged_enum_copy_assignment(&self.annotations)
                 {
                     out.new_line();
+                    write_attrs!("copy-assignment");
                     write!(
                         out,
                         "{}& operator=(const {}& {})",

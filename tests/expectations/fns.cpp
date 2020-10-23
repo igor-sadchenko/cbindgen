@@ -1,6 +1,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
+#include <ostream>
 #include <new>
 
 struct Fns {
@@ -14,5 +15,7 @@ struct Fns {
 extern "C" {
 
 void root(Fns _fns);
+
+void no_return();
 
 } // extern "C"

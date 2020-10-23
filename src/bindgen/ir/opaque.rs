@@ -4,8 +4,6 @@
 
 use std::io::Write;
 
-use syn;
-
 use crate::bindgen::config::{Config, Language};
 use crate::bindgen::declarationtyperesolver::DeclarationTypeResolver;
 use crate::bindgen::dependencies::Dependencies;
@@ -101,23 +99,32 @@ impl Item for OpaqueItem {
     fn instantiate_monomorph(
         &self,
         generic_values: &[Type],
-        _library: &Library,
+        library: &Library,
         out: &mut Monomorphs,
     ) {
         assert!(
-            self.generic_params.len() > 0,
+            !self.generic_params.is_empty(),
             "{} is not generic",
             self.path
         );
+
+        // We can be instantiated with less generic params because of default
+        // template parameters, or because of empty types that we remove during
+        // parsing (`()`).
         assert!(
-            self.generic_params.len() == generic_values.len(),
+            self.generic_params.len() >= generic_values.len(),
             "{} has {} params but is being instantiated with {} values",
             self.path,
             self.generic_params.len(),
             generic_values.len(),
         );
 
-        let mangled_path = mangle::mangle_path(&self.path, generic_values);
+        let mangled_path = mangle::mangle_path(
+            &self.path,
+            generic_values,
+            &library.get_config().export.mangle,
+        );
+
         let monomorph = OpaqueItem::new(
             mangled_path,
             GenericParams::default(),
@@ -137,7 +144,7 @@ impl Source for OpaqueItem {
 
         self.documentation.write(config, out);
 
-        self.generic_params.write(config, out);
+        self.generic_params.write_with_default(config, out);
 
         if config.style.generate_typedef() && config.language == Language::C {
             write!(

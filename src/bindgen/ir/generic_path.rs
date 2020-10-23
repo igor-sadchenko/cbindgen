@@ -1,8 +1,6 @@
 use std::io::Write;
 use std::ops::Deref;
 
-use syn;
-
 use crate::bindgen::config::{Config, Language};
 use crate::bindgen::declarationtyperesolver::{DeclarationType, DeclarationTypeResolver};
 use crate::bindgen::ir::{Path, Type};
@@ -27,6 +25,32 @@ impl GenericParams {
                 .collect(),
         )
     }
+
+    fn write_internal<F: Write>(
+        &self,
+        config: &Config,
+        out: &mut SourceWriter<F>,
+        with_default: bool,
+    ) {
+        if !self.0.is_empty() && config.language == Language::Cxx {
+            out.write("template<");
+            for (i, item) in self.0.iter().enumerate() {
+                if i != 0 {
+                    out.write(", ");
+                }
+                write!(out, "typename {}", item);
+                if with_default {
+                    write!(out, " = void");
+                }
+            }
+            out.write(">");
+            out.new_line();
+        }
+    }
+
+    pub fn write_with_default<F: Write>(&self, config: &Config, out: &mut SourceWriter<F>) {
+        self.write_internal(config, out, true);
+    }
 }
 
 impl Deref for GenericParams {
@@ -39,17 +63,7 @@ impl Deref for GenericParams {
 
 impl Source for GenericParams {
     fn write<F: Write>(&self, config: &Config, out: &mut SourceWriter<F>) {
-        if !self.0.is_empty() && config.language == Language::Cxx {
-            out.write("template<");
-            for (i, item) in self.0.iter().enumerate() {
-                if i != 0 {
-                    out.write(", ");
-                }
-                write!(out, "typename {}", item);
-            }
-            out.write(">");
-            out.new_line();
-        }
+        self.write_internal(config, out, false);
     }
 }
 

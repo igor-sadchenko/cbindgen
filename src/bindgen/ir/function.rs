@@ -2,9 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use std::collections::HashMap;
 use std::io::Write;
-
-use syn;
 
 use crate::bindgen::cdecl;
 use crate::bindgen::config::{Config, Layout};
@@ -18,8 +17,15 @@ use crate::bindgen::library::Library;
 use crate::bindgen::monomorph::Monomorphs;
 use crate::bindgen::rename::{IdentifierType, RenameRule};
 use crate::bindgen::reserved;
-use crate::bindgen::utilities::{find_first_some, IterHelpers};
+use crate::bindgen::utilities::IterHelpers;
 use crate::bindgen::writer::{Source, SourceWriter};
+
+#[derive(Debug, Clone)]
+pub struct FunctionArgument {
+    pub name: Option<String>,
+    pub ty: Type,
+    pub array_length: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Function {
@@ -28,11 +34,12 @@ pub struct Function {
     /// If the function is a method, this will contain the path of the type in the impl block
     pub self_type_path: Option<Path>,
     pub ret: Type,
-    pub args: Vec<(String, Type)>,
+    pub args: Vec<FunctionArgument>,
     pub extern_decl: bool,
     pub cfg: Option<Cfg>,
     pub annotations: AnnotationSet,
     pub documentation: Documentation,
+    pub never_return: bool,
 }
 
 impl Function {
@@ -44,18 +51,24 @@ impl Function {
         attrs: &[syn::Attribute],
         mod_cfg: Option<&Cfg>,
     ) -> Result<Function, String> {
-        let mut args = sig.inputs.iter().try_skip_map(|x| x.as_ident_and_type())?;
+        let mut args = sig.inputs.iter().try_skip_map(|x| x.as_argument())?;
 
+        let mut never_return = false;
         let mut ret = match sig.output {
             syn::ReturnType::Default => Type::Primitive(PrimitiveType::Void),
             syn::ReturnType::Type(_, ref ty) => {
-                Type::load(ty)?.unwrap_or_else(|| Type::Primitive(PrimitiveType::Void))
+                if let syn::Type::Never(_) = ty.as_ref() {
+                    never_return = true;
+                    Type::Primitive(PrimitiveType::Void)
+                } else {
+                    Type::load(ty)?.unwrap_or_else(|| Type::Primitive(PrimitiveType::Void))
+                }
             }
         };
 
         if let Some(self_path) = self_type_path {
-            for (_, ref mut ty) in &mut args {
-                ty.replace_self_with(self_path);
+            for arg in &mut args {
+                arg.ty.replace_self_with(self_path);
             }
             ret.replace_self_with(self_path);
         }
@@ -69,17 +82,18 @@ impl Function {
             cfg: Cfg::append(mod_cfg, Cfg::load(attrs)),
             annotations: AnnotationSet::load(attrs)?,
             documentation: Documentation::load(attrs),
+            never_return,
         })
     }
 
-    pub fn swift_name(&self) -> String {
+    pub fn swift_name(&self) -> Option<String> {
         // If the symbol name starts with the type name, separate the two components with '.'
         // so that Swift recognises the association between the method and the type
         let (ref type_prefix, ref type_name) = match self.self_type_path {
             Some(ref type_name) => {
                 let type_name = type_name.to_string();
                 if !self.path.name().starts_with(&type_name) {
-                    return self.path.to_string();
+                    return Some(self.path.to_string());
                 }
                 (format!("{}.", type_name), type_name)
             }
@@ -93,51 +107,51 @@ impl Function {
             .trim_start_matches('_');
 
         let item_args = {
-            let mut items = vec![];
-            for (arg, _) in self.args.iter() {
-                items.push(format!("{}:", arg.as_str()));
+            let mut items = Vec::with_capacity(self.args.len());
+            for arg in self.args.iter() {
+                items.push(format!("{}:", arg.name.as_ref()?.as_str()));
             }
             items.join("")
         };
-        format!("{}{}({})", type_prefix, item_name, item_args)
+        Some(format!("{}{}({})", type_prefix, item_name, item_args))
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    pub fn simplify_standard_types(&mut self) {
-        self.ret.simplify_standard_types();
-        for &mut (_, ref mut ty) in &mut self.args {
-            ty.simplify_standard_types();
+    pub fn simplify_standard_types(&mut self, config: &Config) {
+        self.ret.simplify_standard_types(config);
+        for arg in &mut self.args {
+            arg.ty.simplify_standard_types(config);
         }
     }
 
     pub fn add_dependencies(&self, library: &Library, out: &mut Dependencies) {
         self.ret.add_dependencies(library, out);
-        for &(_, ref ty) in &self.args {
-            ty.add_dependencies(library, out);
+        for arg in &self.args {
+            arg.ty.add_dependencies(library, out);
         }
     }
 
     pub fn add_monomorphs(&self, library: &Library, out: &mut Monomorphs) {
         self.ret.add_monomorphs(library, out);
-        for &(_, ref ty) in &self.args {
-            ty.add_monomorphs(library, out);
+        for arg in &self.args {
+            arg.ty.add_monomorphs(library, out);
         }
     }
 
     pub fn mangle_paths(&mut self, monomorphs: &Monomorphs) {
         self.ret.mangle_paths(monomorphs);
-        for &mut (_, ref mut ty) in &mut self.args {
-            ty.mangle_paths(monomorphs);
+        for arg in &mut self.args {
+            arg.ty.mangle_paths(monomorphs);
         }
     }
 
     pub fn resolve_declaration_types(&mut self, resolver: &DeclarationTypeResolver) {
         self.ret.resolve_declaration_types(resolver);
-        for &mut (_, ref mut ty) in &mut self.args {
-            ty.resolve_declaration_types(resolver);
+        for arg in &mut self.args {
+            arg.ty.resolve_declaration_types(resolver);
         }
     }
 
@@ -145,32 +159,69 @@ impl Function {
         // Rename the types used in arguments
         let generic_params = Default::default();
         self.ret.rename_for_config(config, &generic_params);
-        for &mut (_, ref mut ty) in &mut self.args {
-            ty.rename_for_config(config, &generic_params);
-        }
 
         // Apply rename rules to argument names
-        let rules = [
-            self.annotations.parse_atom::<RenameRule>("rename-all"),
-            config.function.rename_args,
-        ];
+        let rules = self
+            .annotations
+            .parse_atom::<RenameRule>("rename-all")
+            .unwrap_or(config.function.rename_args);
 
-        if let Some(r) = find_first_some(&rules) {
-            self.args = self
-                .args
-                .iter()
-                .map(|x| {
-                    (
-                        r.apply_to_snake_case(&x.0, IdentifierType::FunctionArg),
-                        x.1.clone(),
-                    )
+        if let Some(r) = rules.not_none() {
+            let args = std::mem::take(&mut self.args);
+            self.args = args
+                .into_iter()
+                .map(|arg| {
+                    let name = arg
+                        .name
+                        .map(|n| r.apply(&n, IdentifierType::FunctionArg).into_owned());
+                    FunctionArgument {
+                        name,
+                        ty: arg.ty,
+                        array_length: None,
+                    }
                 })
                 .collect()
         }
 
-        // Escape C/C++ reserved keywords used in argument names
-        for args in &mut self.args {
-            reserved::escape(&mut args.0);
+        // Escape C/C++ reserved keywords used in argument names, and
+        // recursively rename argument types.
+        for arg in &mut self.args {
+            arg.ty.rename_for_config(config, &generic_params);
+            if let Some(ref mut name) = arg.name {
+                reserved::escape(name);
+            }
+        }
+
+        // Save the array length of the pointer arguments which need to use
+        // the C-array notation
+        if let Some(tuples) = self.annotations.list("ptrs-as-arrays") {
+            let mut ptrs_as_arrays: HashMap<String, String> = HashMap::new();
+            for str_tuple in tuples {
+                let parts: Vec<&str> = str_tuple[1..str_tuple.len() - 1]
+                    .split(';')
+                    .map(|x| x.trim())
+                    .collect();
+                if parts.len() != 2 {
+                    warn!(
+                        "{:?} does not follow the correct syntax, so the annotation is being ignored",
+                        parts
+                    );
+                    continue;
+                }
+                ptrs_as_arrays.insert(parts[0].to_string(), parts[1].to_string());
+            }
+
+            for arg in &mut self.args {
+                match arg.ty {
+                    Type::Ptr { .. } => {}
+                    _ => continue,
+                }
+                let name = match arg.name {
+                    Some(ref name) => name,
+                    None => continue,
+                };
+                arg.array_length = ptrs_as_arrays.get(name).cloned();
+            }
         }
     }
 }
@@ -207,7 +258,15 @@ impl Source for Function {
             }
 
             if let Some(ref swift_name_macro) = config.function.swift_name_macro {
-                write!(out, " {}({})", swift_name_macro, func.swift_name());
+                if let Some(swift_name) = func.swift_name() {
+                    write!(out, " {}({})", swift_name_macro, swift_name);
+                }
+            }
+
+            if func.never_return {
+                if let Some(ref no_return_attr) = config.function.no_return {
+                    out.write_fmt(format_args!(" {}", no_return_attr));
+                }
             }
 
             out.write(";");
@@ -248,7 +307,15 @@ impl Source for Function {
             }
 
             if let Some(ref swift_name_macro) = config.function.swift_name_macro {
-                write!(out, " {}({})", swift_name_macro, func.swift_name());
+                if let Some(swift_name) = func.swift_name() {
+                    write!(out, " {}({})", swift_name_macro, swift_name);
+                }
+            }
+
+            if func.never_return {
+                if let Some(ref no_return_attr) = config.function.no_return {
+                    out.write_fmt(format_args!(" {}", no_return_attr));
+                }
             }
 
             out.write(";");
@@ -268,39 +335,59 @@ impl Source for Function {
     }
 }
 
-pub trait SynFnArgHelpers {
-    fn as_ident_and_type(&self) -> Result<Option<(String, Type)>, String>;
+trait SynFnArgHelpers {
+    fn as_argument(&self) -> Result<Option<FunctionArgument>, String>;
 }
 
 fn gen_self_type(receiver: &syn::Receiver) -> Type {
     let self_ty = Type::Path(GenericPath::self_path());
-    match receiver.reference {
-        Some(_) => match receiver.mutability {
-            Some(_) => Type::Ptr(Box::new(self_ty)),
-            None => Type::ConstPtr(Box::new(self_ty)),
-        },
-        None => self_ty,
+    if receiver.reference.is_none() {
+        return self_ty;
+    }
+
+    let is_const = receiver.mutability.is_none();
+    Type::Ptr {
+        ty: Box::new(self_ty),
+        is_const,
+        is_nullable: false,
+        is_ref: false,
     }
 }
 
 impl SynFnArgHelpers for syn::FnArg {
-    fn as_ident_and_type(&self) -> Result<Option<(String, Type)>, String> {
+    fn as_argument(&self) -> Result<Option<FunctionArgument>, String> {
         match *self {
             syn::FnArg::Typed(syn::PatType {
                 ref pat, ref ty, ..
-            }) => match **pat {
-                syn::Pat::Ident(syn::PatIdent { ref ident, .. }) => {
-                    let ty = match Type::load(ty)? {
-                        Some(x) => x,
-                        None => return Ok(None),
-                    };
-                    Ok(Some((ident.to_string(), ty)))
+            }) => {
+                let name = match **pat {
+                    syn::Pat::Wild(..) => None,
+                    syn::Pat::Ident(syn::PatIdent { ref ident, .. }) => Some(ident.to_string()),
+                    _ => {
+                        return Err(format!(
+                            "Parameter has an unsupported argument name: {:?}",
+                            pat
+                        ))
+                    }
+                };
+                let ty = match Type::load(ty)? {
+                    Some(x) => x,
+                    None => return Ok(None),
+                };
+                if let Type::Array(..) = ty {
+                    return Err("Array as function arguments are not supported".to_owned());
                 }
-                _ => Err("Parameter has an unsupported type.".to_owned()),
-            },
-            syn::FnArg::Receiver(ref receiver) => {
-                Ok(Some(("self".to_string(), gen_self_type(receiver))))
+                Ok(Some(FunctionArgument {
+                    name,
+                    ty,
+                    array_length: None,
+                }))
             }
+            syn::FnArg::Receiver(ref receiver) => Ok(Some(FunctionArgument {
+                name: Some("self".to_string()),
+                ty: gen_self_type(receiver),
+                array_length: None,
+            })),
         }
     }
 }

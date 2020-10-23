@@ -1,6 +1,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
+#include <ostream>
 #include <new>
 
 #if (defined(PLATFORM_WIN) || defined(M_32))
@@ -104,9 +105,9 @@ union C {
 #endif
 
 #if defined(PLATFORM_UNIX)
-  static C C5(const int32_t &aInt) {
+  static C C5(const int32_t &int_) {
     C result;
-    ::new (&result.c5.int_) (int32_t)(aInt);
+    ::new (&result.c5.int_) (int32_t)(int_);
     result.tag = Tag::C5;
     return result;
   }
@@ -124,8 +125,9 @@ union C {
 #if defined(PLATFORM_UNIX)
       case Tag::C5: return c5 == other.c5;
 #endif
-      default: return true;
+      default: break;
     }
+    return true;
   }
 
   bool operator!=(const C& other) const {

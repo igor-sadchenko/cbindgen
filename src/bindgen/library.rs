@@ -3,7 +3,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use std::collections::HashMap;
-use std::mem;
 
 use crate::bindgen::bindings::Bindings;
 use crate::bindgen::config::{Config, Language, SortKey};
@@ -29,6 +28,7 @@ pub struct Library {
 }
 
 impl Library {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
         constants: ItemMap<Constant>,
@@ -57,10 +57,8 @@ impl Library {
         self.transfer_annotations();
         self.simplify_standard_types();
 
-        match self.config.function.sort_by {
-            SortKey::Name => {
-                self.functions.sort_by(|x, y| x.path.cmp(&y.path));
-            }
+        match self.config.function.sort_by.unwrap_or(self.config.sort_by) {
+            SortKey::Name => self.functions.sort_by(|x, y| x.path.cmp(&y.path)),
             SortKey::None => { /* keep input order */ }
         }
 
@@ -103,18 +101,28 @@ impl Library {
 
         let items = dependencies.order;
         let constants = if self.config.export.should_generate(ItemType::Constants) {
-            self.constants.to_vec()
+            let mut constants = self.constants.to_vec();
+            match self.config.constant.sort_by.unwrap_or(self.config.sort_by) {
+                SortKey::Name => constants.sort_by(|x, y| x.path.cmp(&y.path)),
+                SortKey::None => { /* keep input order */ }
+            }
+            constants
         } else {
             vec![]
         };
 
         let globals = if self.config.export.should_generate(ItemType::Globals) {
-            self.globals.to_vec()
+            let mut globals = self.globals.to_vec();
+            match self.config.constant.sort_by.unwrap_or(self.config.sort_by) {
+                SortKey::Name => globals.sort_by(|x, y| x.path.cmp(&y.path)),
+                SortKey::None => { /* keep input order */ }
+            }
+            globals
         } else {
             vec![]
         };
         let functions = if self.config.export.should_generate(ItemType::Functions) {
-            mem::replace(&mut self.functions, vec![])
+            self.functions
         } else {
             vec![]
         };
@@ -147,6 +155,10 @@ impl Library {
         find!(typedefs, Typedefs);
 
         None
+    }
+
+    pub fn get_config(&self) -> &Config {
+        &self.config
     }
 
     fn remove_excluded(&mut self) {
@@ -300,7 +312,7 @@ impl Library {
             return;
         }
 
-        let mut resolver = DeclarationTypeResolver::new();
+        let mut resolver = DeclarationTypeResolver::default();
 
         self.structs.for_all_items(|x| {
             x.collect_declaration_types(&mut resolver);
@@ -339,20 +351,22 @@ impl Library {
     }
 
     fn simplify_standard_types(&mut self) {
+        let config = &self.config;
+
         self.structs.for_all_items_mut(|x| {
-            x.simplify_standard_types();
+            x.simplify_standard_types(config);
         });
         self.unions.for_all_items_mut(|x| {
-            x.simplify_standard_types();
+            x.simplify_standard_types(config);
         });
         self.globals.for_all_items_mut(|x| {
-            x.simplify_standard_types();
+            x.simplify_standard_types(config);
         });
         self.typedefs.for_all_items_mut(|x| {
-            x.simplify_standard_types();
+            x.simplify_standard_types(config);
         });
         for x in &mut self.functions {
-            x.simplify_standard_types();
+            x.simplify_standard_types(config);
         }
     }
 

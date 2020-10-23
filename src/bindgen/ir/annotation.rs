@@ -2,10 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::str::FromStr;
-
-use syn;
 
 use crate::bindgen::utilities::SynAttributeHelpers;
 
@@ -31,7 +30,7 @@ pub enum AnnotationValue {
 }
 
 /// A set of annotations specified by a document comment.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct AnnotationSet {
     annotations: HashMap<String, AnnotationValue>,
     pub must_use: bool,
@@ -115,6 +114,13 @@ impl AnnotationSet {
             annotations,
             must_use,
         })
+    }
+
+    /// Adds an annotation value if none is specified.
+    pub fn add_default(&mut self, name: &str, value: AnnotationValue) {
+        if let Entry::Vacant(e) = self.annotations.entry(name.to_string()) {
+            e.insert(value);
+        }
     }
 
     pub fn list(&self, name: &str) -> Option<Vec<String>> {

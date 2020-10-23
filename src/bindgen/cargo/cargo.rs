@@ -39,9 +39,10 @@ impl Cargo {
         binding_crate_name: Option<&str>,
         use_cargo_lock: bool,
         clean: bool,
+        existing_metadata_file: Option<&Path>,
     ) -> Result<Cargo, Error> {
         let toml_path = crate_dir.join("Cargo.toml");
-        let metadata = cargo_metadata::metadata(&toml_path)
+        let metadata = cargo_metadata::metadata(&toml_path, existing_metadata_file)
             .map_err(|x| Error::CargoMetadata(toml_path.to_str().unwrap().to_owned(), x))?;
         let lock_path = lock_file
             .map(PathBuf::from)
@@ -144,7 +145,7 @@ impl Cargo {
                         if package.name_and_version.name != dep_name {
                             return None;
                         }
-                        package.name_and_version.version.as_ref().map(|v| v.as_str())
+                        package.name_and_version.version.as_deref()
                     });
 
                     // If the iterator contains more items, meaning multiple versions of the same
@@ -236,7 +237,7 @@ impl Cargo {
         cargo_expand::expand(
             &self.manifest_path,
             &package.name,
-            package.version.as_ref().map(|v| &**v),
+            package.version.as_deref(),
             self.clean,
             expand_all_features,
             expand_default_features,

@@ -5,8 +5,6 @@
 use std::fmt;
 use std::io::Write;
 
-use syn;
-
 use crate::bindgen::cargo::cargo_metadata::Dependency;
 use crate::bindgen::config::Config;
 use crate::bindgen::writer::SourceWriter;
@@ -124,14 +122,10 @@ impl Cfg {
     }
 
     pub fn load_metadata(dependency: &Dependency) -> Option<Cfg> {
-        dependency
-            .target
-            .as_ref()
-            .map(|target| {
-                syn::parse_str::<syn::Meta>(target)
-                    .expect("error parsing dependency's target metadata")
-            })
-            .and_then(|target| {
+        let target = dependency.target.as_ref()?;
+        match syn::parse_str::<syn::Meta>(target) {
+            Ok(target) => {
+                // Parsing succeeded using the #[cfg] syntax
                 if let syn::Meta::List(syn::MetaList { path, nested, .. }) = target {
                     if !path.is_ident("cfg") || nested.len() != 1 {
                         return None;
@@ -140,7 +134,16 @@ impl Cfg {
                 } else {
                     None
                 }
-            })
+            }
+            Err(_) => {
+                // Parsing failed using #[cfg], this may be a literal target
+                // name
+                Cfg::load_single(&syn::NestedMeta::Lit(syn::Lit::Str(syn::LitStr::new(
+                    target,
+                    proc_macro2::Span::call_site(),
+                ))))
+            }
+        }
     }
 
     fn load_single(item: &syn::NestedMeta) -> Option<Cfg> {

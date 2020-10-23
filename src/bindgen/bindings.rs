@@ -133,6 +133,11 @@ impl Bindings {
             write!(out, "#define {}", f);
             out.new_line();
         }
+        if self.config.pragma_once {
+            out.new_line_if_not_start();
+            write!(out, "#pragma once");
+            out.new_line();
+        }
         if self.config.include_version {
             out.new_line_if_not_start();
             write!(
@@ -151,6 +156,7 @@ impl Bindings {
         if self.config.no_includes
             && self.config.sys_includes.is_empty()
             && self.config.includes.is_empty()
+            && self.config.after_includes.is_none()
         {
             return;
         }
@@ -174,6 +180,8 @@ impl Bindings {
                 out.new_line();
                 out.write("#include <cstdlib>");
                 out.new_line();
+                out.write("#include <ostream>");
+                out.new_line();
                 out.write("#include <new>");
                 out.new_line();
                 if self.config.enumeration.cast_assert_name.is_none()
@@ -195,6 +203,11 @@ impl Bindings {
             write!(out, "#include \"{}\"", include);
             out.new_line();
         }
+
+        if let Some(ref line) = self.config.after_includes {
+            write!(out, "{}", line);
+            out.new_line();
+        }
     }
 
     pub fn write<F: Write>(&self, file: F) {
@@ -205,7 +218,7 @@ impl Bindings {
         self.open_namespaces(&mut out);
 
         for constant in &self.constants {
-            if constant.ty.is_primitive_or_ptr_primitive() {
+            if constant.uses_only_primitive_types() {
                 out.new_line_if_not_start();
                 constant.write(&self.config, &mut out, None);
                 out.new_line();
@@ -236,7 +249,7 @@ impl Bindings {
         }
 
         for constant in &self.constants {
-            if !constant.ty.is_primitive_or_ptr_primitive() {
+            if !constant.uses_only_primitive_types() {
                 out.new_line_if_not_start();
                 constant.write(&self.config, &mut out, None);
                 out.new_line();

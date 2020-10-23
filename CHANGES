@@ -1,3 +1,63 @@
+## 0.15.0
+
+     * Allow customizing mangling of generic parameters in C (#575)
+     * Box<T> simplifies to T* in C (4ce324c)
+     * ManuallyDrop<T> and MaybeUninit<T> simplify to T in C, and are opaque in C++ (0076a17)
+     * C++ supports a derive-ostream annotation to derive serialization of structs, unions and enums (#582)
+     * Large character constants have been fixed on Windows (#586)
+     * Constants are now generated for typedefs, etc (#589)
+     * The `sort_by` configuration option has been made to work for constants (#587)
+     * Default sort order is source order now (sort_by = "None"), and can be changed by the above option (#587)
+
+## 0.14.6
+
+     * Fixed the builds with older versions of rustc.
+
+## 0.14.5
+
+     * Add support to specify line ending style (#568)
+     * Add cbindgen:ptrs-as-arrays annotation to allow making function
+       arguments C/C++ arrays.
+
+## 0.14.4
+
+     * Allow to override the mangling separator (#502)
+
+     * cbindgen now handles better having ZSTs in template parameters, and
+       default template parameters (#563).
+
+     * Support for annotating nonnull pointers (#558)
+
+     * Fixed bitflags that overflow a signed integer (#556)
+
+     * Support for wildcard argument names (#550)
+
+     * Support for the never return type, with configurable annotation (#549)
+
+     * Properly reject arrays as function arguments (#540)
+
+## 0.14.3
+
+     * Introduce cbindgen:ignore comment annotation, to allow ignoring items or modules. (#519)
+     * Support for casts in constant expressions. (#526)
+     * Make a non-fatal error a warning message. (#535)
+     * Add a --metadata option to the CLI, to allow passing pre-computed cargo metadata. (#538)
+
+## 0.14.2
+
+     * Fixed minimal dependency versions. (#507)
+     * Add an option to write pragma once. (#511)
+     * Fix submodule scanning for implicit Rust 2018 modules. (#512)
+     * Fix dependency parsing / scanning to handle target-specific versions. (#513)
+     * Use heck for case conversion. (#514)
+     * Add support for verbatim content after includes. (#416)
+     * Allow to add attributes to most generated functions. (#515)
+
+## 0.14.1
+
+     * Handle mangling pointers. (#508)
+     * Unconditionally generate a return statement in partialeq implementations. (#509)
+
 ## 0.14.0
 
      * Minor tweak at how [export.exclude] is handled to allow excluding

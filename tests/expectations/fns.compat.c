@@ -17,6 +17,8 @@ extern "C" {
 
 void root(Fns _fns);
 
+void no_return(void);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif // __cplusplus

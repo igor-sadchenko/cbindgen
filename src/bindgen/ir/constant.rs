@@ -37,15 +37,26 @@ pub enum Literal {
         export_name: String,
         fields: HashMap<String, Literal>,
     },
+    Cast {
+        ty: Type,
+        value: Box<Literal>,
+    },
 }
 
 impl Literal {
     fn replace_self_with(&mut self, self_ty: &Path) {
         match *self {
-            Literal::PostfixUnaryOp { .. }
-            | Literal::BinOp { .. }
-            | Literal::Expr(..)
-            | Literal::Path(..) => {}
+            Literal::PostfixUnaryOp { ref mut value, .. } => {
+                value.replace_self_with(self_ty);
+            }
+            Literal::BinOp {
+                ref mut left,
+                ref mut right,
+                ..
+            } => {
+                left.replace_self_with(self_ty);
+                right.replace_self_with(self_ty);
+            }
             Literal::Struct {
                 ref mut path,
                 ref mut export_name,
@@ -54,10 +65,18 @@ impl Literal {
                 if path.replace_self_with(self_ty) {
                     *export_name = self_ty.name().to_owned();
                 }
-                for (ref _name, ref mut expr) in fields {
+                for ref mut expr in fields.values_mut() {
                     expr.replace_self_with(self_ty);
                 }
             }
+            Literal::Cast {
+                ref mut ty,
+                ref mut value,
+            } => {
+                ty.replace_self_with(self_ty);
+                value.replace_self_with(self_ty);
+            }
+            Literal::Expr(..) | Literal::Path(..) => {}
         }
     }
 
@@ -72,6 +91,24 @@ impl Literal {
                 ..
             } => left.is_valid(bindings) && right.is_valid(bindings),
             Literal::Struct { ref path, .. } => bindings.struct_exists(path),
+            Literal::Cast { ref value, .. } => value.is_valid(bindings),
+        }
+    }
+
+    pub fn uses_only_primitive_types(&self) -> bool {
+        match self {
+            Literal::Expr(..) => true,
+            Literal::Path(..) => true,
+            Literal::PostfixUnaryOp { ref value, .. } => value.uses_only_primitive_types(),
+            Literal::BinOp {
+                ref left,
+                ref right,
+                ..
+            } => left.uses_only_primitive_types() & right.uses_only_primitive_types(),
+            Literal::Struct { .. } => false,
+            Literal::Cast { ref value, ref ty } => {
+                value.uses_only_primitive_types() && ty.is_primitive_or_ptr_primitive()
+            }
         }
     }
 }
@@ -85,7 +122,7 @@ impl Literal {
                 ..
             } => {
                 config.export.rename(export_name);
-                for (_, lit) in fields {
+                for lit in fields.values_mut() {
                     lit.rename_for_config(config);
                 }
             }
@@ -104,6 +141,13 @@ impl Literal {
                 right.rename_for_config(config);
             }
             Literal::Expr(_) => {}
+            Literal::Cast {
+                ref mut ty,
+                ref mut value,
+            } => {
+                ty.rename_for_config(config, &GenericParams::default());
+                value.rename_for_config(config);
+            }
         }
     }
 
@@ -151,16 +195,13 @@ impl Literal {
                 })
             }
 
-            // Match literals like "one", 'a', 32 etc
+            // Match literals like true, 'a', 32 etc
             syn::Expr::Lit(syn::ExprLit { ref lit, .. }) => {
                 match lit {
-                    syn::Lit::Str(ref value) => {
-                        Ok(Literal::Expr(format!("u8\"{}\"", value.value())))
-                    }
                     syn::Lit::Byte(ref value) => Ok(Literal::Expr(format!("{}", value.value()))),
                     syn::Lit::Char(ref value) => Ok(Literal::Expr(match value.value() as u32 {
                         0..=255 => format!("'{}'", value.value().escape_default()),
-                        other_code => format!(r"L'\U{:08X}'", other_code),
+                        other_code => format!(r"U'\U{:08X}'", other_code),
                     })),
                     syn::Lit::Int(ref value) => {
                         if value.base10_parse::<i64>().is_err() {
@@ -229,6 +270,19 @@ impl Literal {
 
             syn::Expr::Paren(syn::ExprParen { ref expr, .. }) => Self::load(expr),
 
+            syn::Expr::Cast(syn::ExprCast {
+                ref expr, ref ty, ..
+            }) => {
+                let val = Self::load(expr)?;
+                match Type::load(ty)? {
+                    Some(ty) => Ok(Literal::Cast {
+                        ty,
+                        value: Box::new(val),
+                    }),
+                    None => Err("Cannot cast to zero sized type.".to_owned()),
+                }
+            }
+
             _ => Err(format!("Unsupported expression. {:?}", *expr)),
         }
     }
@@ -251,6 +305,12 @@ impl Literal {
                 write!(out, " {} ", op);
                 right.write(config, out);
                 write!(out, ")");
+            }
+            Literal::Cast { ref ty, ref value } => {
+                write!(out, "(");
+                ty.write(config, out);
+                write!(out, ")");
+                value.write(config, out);
             }
             Literal::Struct {
                 export_name,
@@ -300,16 +360,6 @@ pub struct Constant {
     pub associated_to: Option<Path>,
 }
 
-fn can_handle(ty: &Type, expr: &syn::Expr) -> bool {
-    if ty.is_primitive_or_ptr_primitive() {
-        return true;
-    }
-    match *expr {
-        syn::Expr::Struct(_) => true,
-        _ => false,
-    }
-}
-
 impl Constant {
     pub fn load(
         path: Path,
@@ -326,10 +376,6 @@ impl Constant {
                 return Err("Cannot have a zero sized const definition.".to_owned());
             }
         };
-
-        if !can_handle(&ty, expr) {
-            return Err("Unhandled const definition".to_owned());
-        }
 
         let mut lit = Literal::load(&expr)?;
 
@@ -369,6 +415,10 @@ impl Constant {
             documentation,
             associated_to,
         }
+    }
+
+    pub fn uses_only_primitive_types(&self) -> bool {
+        self.value.uses_only_primitive_types() && self.ty.is_primitive_or_ptr_primitive()
     }
 }
 
@@ -427,7 +477,7 @@ impl Constant {
         debug_assert!(config.structure.associated_constants_in_body);
         debug_assert!(config.constant.allow_static_const);
 
-        if let Type::ConstPtr(..) = self.ty {
+        if let Type::Ptr { is_const: true, .. } = self.ty {
             out.write("static ");
         } else {
             out.write("static const ");
@@ -512,7 +562,7 @@ impl Constant {
                 out.write(if in_body { "inline " } else { "static " });
             }
 
-            if let Type::ConstPtr(..) = self.ty {
+            if let Type::Ptr { is_const: true, .. } = self.ty {
                 // Nothing.
             } else {
                 out.write("const ");

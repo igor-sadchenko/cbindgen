@@ -4,8 +4,6 @@
 
 #![allow(clippy::redundant_closure_call)]
 
-use syn;
-
 pub trait IterHelpers: Iterator {
     fn try_skip_map<F, T, E>(&mut self, f: F) -> Result<Vec<T>, E>
     where
@@ -21,7 +19,7 @@ where
         F: FnMut(&Self::Item) -> Result<Option<T>, E>,
     {
         let mut out = Vec::new();
-        while let Some(item) = self.next() {
+        for item in self {
             if let Some(x) = f(&item)? {
                 out.push(x);
             }
@@ -30,16 +28,7 @@ where
     }
 }
 
-pub fn find_first_some<T>(slice: &[Option<T>]) -> Option<&T> {
-    for x in slice {
-        if let Some(ref x) = *x {
-            return Some(x);
-        }
-    }
-    None
-}
-
-pub trait SynItemFnHelpers: SynItemHelpers {
+pub trait SynItemFnHelpers: SynAttributeHelpers {
     fn exported_name(&self) -> Option<String>;
 }
 
@@ -71,77 +60,160 @@ impl SynItemFnHelpers for syn::ImplItemMethod {
     }
 }
 
-pub trait SynItemHelpers {
+/// Returns whether this attribute causes us to skip at item. This basically
+/// checks for `#[cfg(test)]`, `#[test]`, `/// cbindgen::ignore` and
+/// variations thereof.
+fn is_skip_item_attr(attr: &syn::Meta) -> bool {
+    match *attr {
+        syn::Meta::Path(ref path) => {
+            // TODO(emilio): It'd be great if rustc allowed us to use a syntax
+            // like `#[cbindgen::ignore]` or such.
+            path.is_ident("test")
+        }
+        syn::Meta::List(ref list) => {
+            if !list.path.is_ident("cfg") {
+                return false;
+            }
+            list.nested.iter().any(|nested| match *nested {
+                syn::NestedMeta::Meta(ref meta) => is_skip_item_attr(meta),
+                syn::NestedMeta::Lit(..) => false,
+            })
+        }
+        syn::Meta::NameValue(ref name_value) => {
+            if name_value.path.is_ident("doc") {
+                if let syn::Lit::Str(ref content) = name_value.lit {
+                    // FIXME(emilio): Maybe should use the general annotation
+                    // mechanism, but it seems overkill for this.
+                    if content.value().trim() == "cbindgen:ignore" {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+    }
+}
+
+pub trait SynAttributeHelpers {
+    /// Returns the list of attributes for an item.
+    fn attrs(&self) -> &[syn::Attribute];
+
     /// Searches for attributes like `#[test]`.
     /// Example:
     /// - `item.has_attr_word("test")` => `#[test]`
-    fn has_attr_word(&self, name: &str) -> bool;
-
-    /// Searches for attributes like `#[cfg(test)]`.
-    /// Example:
-    /// - `item.has_attr_list("cfg", &["test"])` => `#[cfg(test)]`
-    fn has_attr_list(&self, name: &str, args: &[&str]) -> bool;
+    fn has_attr_word(&self, name: &str) -> bool {
+        self.attrs()
+            .iter()
+            .filter_map(|x| x.parse_meta().ok())
+            .any(|attr| {
+                if let syn::Meta::Path(ref path) = attr {
+                    path.is_ident(name)
+                } else {
+                    false
+                }
+            })
+    }
 
     fn is_no_mangle(&self) -> bool {
         self.has_attr_word("no_mangle")
     }
 
-    /// Searches for attributes `#[test]` and/or `#[cfg(test)]`.
-    fn has_test_attr(&self) -> bool {
-        self.has_attr_list("cfg", &["test"]) || self.has_attr_word("test")
+    /// Sees whether we should skip parsing a given item.
+    fn should_skip_parsing(&self) -> bool {
+        for attr in self.attrs() {
+            let meta = match attr.parse_meta() {
+                Ok(attr) => attr,
+                Err(..) => return false,
+            };
+            if is_skip_item_attr(&meta) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn attr_name_value_lookup(&self, name: &str) -> Option<String> {
+        self.attrs()
+            .iter()
+            .filter_map(|attr| {
+                let attr = attr.parse_meta().ok()?;
+                if let syn::Meta::NameValue(syn::MetaNameValue {
+                    path,
+                    lit: syn::Lit::Str(lit),
+                    ..
+                }) = attr
+                {
+                    if path.is_ident(name) {
+                        return Some(lit.value());
+                    }
+                }
+                None
+            })
+            .next()
+    }
+
+    fn get_comment_lines(&self) -> Vec<String> {
+        let mut comment = Vec::new();
+
+        for attr in self.attrs() {
+            if attr.style == syn::AttrStyle::Outer {
+                if let Ok(syn::Meta::NameValue(syn::MetaNameValue {
+                    path,
+                    lit: syn::Lit::Str(content),
+                    ..
+                })) = attr.parse_meta()
+                {
+                    if path.is_ident("doc") {
+                        comment.extend(split_doc_attr(&content.value()));
+                    }
+                }
+            }
+        }
+
+        comment
     }
 }
 
 macro_rules! syn_item_match_helper {
     ($s:ident => has_attrs: |$i:ident| $a:block, otherwise: || $b:block) => {
         match *$s {
-            syn::Item::Const(ref item) => (|$i: &syn::ItemConst| $a)(item),
-            syn::Item::Enum(ref item) => (|$i: &syn::ItemEnum| $a)(item),
-            syn::Item::ExternCrate(ref item) => (|$i: &syn::ItemExternCrate| $a)(item),
-            syn::Item::Fn(ref item) => (|$i: &syn::ItemFn| $a)(item),
-            syn::Item::ForeignMod(ref item) => (|$i: &syn::ItemForeignMod| $a)(item),
-            syn::Item::Impl(ref item) => (|$i: &syn::ItemImpl| $a)(item),
-            syn::Item::Macro(ref item) => (|$i: &syn::ItemMacro| $a)(item),
-            syn::Item::Macro2(ref item) => (|$i: &syn::ItemMacro2| $a)(item),
-            syn::Item::Mod(ref item) => (|$i: &syn::ItemMod| $a)(item),
-            syn::Item::Static(ref item) => (|$i: &syn::ItemStatic| $a)(item),
-            syn::Item::Struct(ref item) => (|$i: &syn::ItemStruct| $a)(item),
-            syn::Item::Trait(ref item) => (|$i: &syn::ItemTrait| $a)(item),
-            syn::Item::Type(ref item) => (|$i: &syn::ItemType| $a)(item),
-            syn::Item::Union(ref item) => (|$i: &syn::ItemUnion| $a)(item),
-            syn::Item::Use(ref item) => (|$i: &syn::ItemUse| $a)(item),
-            syn::Item::TraitAlias(ref item) => (|$i: &syn::ItemTraitAlias| $a)(item),
-            syn::Item::Verbatim(_) => (|| $b)(),
+            syn::Item::Const(ref $i) => $a,
+            syn::Item::Enum(ref $i) => $a,
+            syn::Item::ExternCrate(ref $i) => $a,
+            syn::Item::Fn(ref $i) => $a,
+            syn::Item::ForeignMod(ref $i) => $a,
+            syn::Item::Impl(ref $i) => $a,
+            syn::Item::Macro(ref $i) => $a,
+            syn::Item::Macro2(ref $i) => $a,
+            syn::Item::Mod(ref $i) => $a,
+            syn::Item::Static(ref $i) => $a,
+            syn::Item::Struct(ref $i) => $a,
+            syn::Item::Trait(ref $i) => $a,
+            syn::Item::Type(ref $i) => $a,
+            syn::Item::Union(ref $i) => $a,
+            syn::Item::Use(ref $i) => $a,
+            syn::Item::TraitAlias(ref $i) => $a,
+            syn::Item::Verbatim(_) => $b,
             _ => panic!("Unhandled syn::Item:  {:?}", $s),
         }
     };
 }
 
-impl SynItemHelpers for syn::Item {
-    fn has_attr_word(&self, name: &str) -> bool {
+impl SynAttributeHelpers for syn::Item {
+    fn attrs(&self) -> &[syn::Attribute] {
         syn_item_match_helper!(self =>
-            has_attrs: |item| { item.has_attr_word(name) },
-            otherwise: || { false }
-        )
-    }
-
-    fn has_attr_list(&self, name: &str, args: &[&str]) -> bool {
-        syn_item_match_helper!(self =>
-            has_attrs: |item| { item.has_attr_list(name, args) },
-            otherwise: || { false }
+            has_attrs: |item| { &item.attrs },
+            otherwise: || { &[] }
         )
     }
 }
 
 macro_rules! impl_syn_item_helper {
     ($t:ty) => {
-        impl SynItemHelpers for $t {
-            fn has_attr_word(&self, name: &str) -> bool {
-                self.attrs.has_attr_word(name)
-            }
-
-            fn has_attr_list(&self, name: &str, args: &[&str]) -> bool {
-                self.attrs.has_attr_list(name, args)
+        impl SynAttributeHelpers for $t {
+            fn attrs(&self) -> &[syn::Attribute] {
+                &self.attrs
             }
         }
     };
@@ -175,7 +247,7 @@ impl SynAbiHelpers for Option<syn::Abi> {
     fn is_c(&self) -> bool {
         if let Some(ref abi) = *self {
             if let Some(ref lit_string) = abi.name {
-                return lit_string.value() == String::from("C");
+                return lit_string.value() == "C";
             }
         }
         false
@@ -192,7 +264,7 @@ impl SynAbiHelpers for Option<syn::Abi> {
 impl SynAbiHelpers for syn::Abi {
     fn is_c(&self) -> bool {
         if let Some(ref lit_string) = self.name {
-            lit_string.value() == String::from("C")
+            lit_string.value() == "C"
         } else {
             false
         }
@@ -202,83 +274,9 @@ impl SynAbiHelpers for syn::Abi {
     }
 }
 
-pub trait SynAttributeHelpers {
-    fn get_comment_lines(&self) -> Vec<String>;
-    fn has_attr_word(&self, name: &str) -> bool;
-    fn has_attr_list(&self, name: &str, args: &[&str]) -> bool;
-    fn attr_name_value_lookup(&self, name: &str) -> Option<String>;
-}
-
 impl SynAttributeHelpers for [syn::Attribute] {
-    fn has_attr_word(&self, name: &str) -> bool {
-        self.iter().filter_map(|x| x.parse_meta().ok()).any(|attr| {
-            if let syn::Meta::Path(ref path) = attr {
-                path.is_ident(name)
-            } else {
-                false
-            }
-        })
-    }
-
-    fn has_attr_list(&self, name: &str, args: &[&str]) -> bool {
-        self.iter().filter_map(|x| x.parse_meta().ok()).any(|attr| {
-            if let syn::Meta::List(syn::MetaList { path, nested, .. }) = attr {
-                if !path.is_ident(name) {
-                    return false;
-                }
-                args.iter().all(|arg| {
-                    nested.iter().any(|nested_meta| {
-                        if let syn::NestedMeta::Meta(syn::Meta::Path(path)) = nested_meta {
-                            path.is_ident(arg)
-                        } else {
-                            false
-                        }
-                    })
-                })
-            } else {
-                false
-            }
-        })
-    }
-
-    fn attr_name_value_lookup(&self, name: &str) -> Option<String> {
-        self.iter()
-            .filter_map(|attr| {
-                let attr = attr.parse_meta().ok()?;
-                if let syn::Meta::NameValue(syn::MetaNameValue {
-                    path,
-                    lit: syn::Lit::Str(lit),
-                    ..
-                }) = attr
-                {
-                    if path.is_ident(name) {
-                        return Some(lit.value());
-                    }
-                }
-                None
-            })
-            .next()
-    }
-
-    fn get_comment_lines(&self) -> Vec<String> {
-        let mut comment = Vec::new();
-
-        for attr in self {
-            if attr.style == syn::AttrStyle::Outer {
-                if let Ok(syn::Meta::NameValue(syn::MetaNameValue {
-                    path,
-                    lit: syn::Lit::Str(content),
-                    ..
-                })) = attr.parse_meta()
-                {
-                    if path.is_ident("doc") {
-                        comment.extend(split_doc_attr(&content.value()));
-                    }
-                }
-            }
-        }
-
-        comment
+    fn attrs(&self) -> &[syn::Attribute] {
+        self
     }
 }
 

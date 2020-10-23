@@ -36,6 +36,8 @@ Then all you need to do is run it:
 cbindgen --config cbindgen.toml --crate my_rust_library --output my_header.h
 ```
 
+This produces a header file for C++.  For C, add the `--lang c` switch.
+
 See `cbindgen --help` for more options.
 
 [Get a template cbindgen.toml here.](template.toml)
@@ -235,7 +237,18 @@ An annotation may be a bool, string (no quotes), or list of strings. If just the
 
 Most annotations are just local overrides for identical settings in the cbindgen.toml, but a few are unique because they don't make sense in a global context. The set of supported annotation are as follows:
 
+### Ignore annotation
 
+cbindgen will automatically ignore any `#[test]` or `#[cfg(test)]` item it
+finds. You can manually ignore other stuff with the `ignore` annotation
+attribute:
+
+```rust
+pub mod my_interesting_mod;
+
+/// cbindgen:ignore
+pub mod my_uninteresting_mod; // This won't be scanned by cbindgen.
+```
 
 ### Struct Annotations
 
@@ -251,8 +264,32 @@ The rest are just local overrides for the same options found in the cbindgen.tom
 * derive-lte
 * derive-gt
 * derive-gte
+* {eq,neq,lt,lte,gt,gte}-attributes: Takes a single identifier which will be
+  emitted before the signature of the auto-generated `operator==` / `operator!=`
+  / etc(if any). The idea is for this to be used to annotate the operator with
+  attributes, for example:
 
+```rust
+/// cbindgen:eq-attributes=MY_ATTRIBUTES
+#[repr(C)]
+pub struct Foo { .. }
+```
 
+Will generate something like:
+
+```
+  MY_ATTRIBUTES bool operator==(const Foo& other) const {
+    ...
+  }
+```
+
+Combined with something like:
+
+```
+#define MY_ATTRIBUTES [[nodiscard]]
+```
+
+for example.
 
 ### Enum Annotations
 
@@ -272,8 +309,18 @@ The rest are just local overrides for the same options found in the cbindgen.tom
 * enum-class
 * prefix-with-name
 * private-default-tagged-enum-constructor
+* {destructor,copy-constructor,copy-assignment}-attributes: See the description
+  of the struct attributes, these do the same for the respective generated code.
 
+### Enum variant annotations
 
+These apply to both tagged and untagged enum _variants_.
+
+* variant-{constructor,const-cast,mut-cast,is}-attributes: See the description
+  of the struct attributes. These do the same for the respective functions.
+
+TODO: We should allow to override the `derive-{const,mut}-casts`, helper methods
+et al. with per-variant annotations, probably.
 
 ### Union Annotations
 
@@ -292,6 +339,19 @@ All function attributes are just local overrides for the same options found in t
 * rename-all=RenameRule
 * prefix
 * postfix
+* ptrs-as-arrays=\[[ptr\_name1; array\_length1], [ptr\_name2; array\_length2], ...\] -- represents the pointer arguments of a function as arrays. Below how the mappings are performed:
+
+```
+arg: *const T --> const T arg[array_length]
+arg: *mut T ---> T arg[array_length]
+```
+
+If `array_length` is not specified:
+
+```
+arg: *const T --> const T arg[]
+arg: *mut T --> T arg[]
+```
 
 ## Generating Swift Bindings
 
@@ -302,7 +362,6 @@ This attribute is commonly used in Objective-C/C/C++ via the `NS_SWIFT_NAME` and
 Given configuration in the cbindgen.toml, `cbindgen` can generate these attributes for you by guessing an appropriate method signature based on the existing function name (and type, if it is a method in an `impl` block).
 
 This is controlled by the `swift_name_macro` option in the cbindgen.toml.
-
 
 ## cbindgen.toml
 
@@ -334,6 +393,10 @@ trailer = "/* Text to put at the end of the generated file */"
 # An optional name to use as an include guard
 # default: doesn't emit an include guard
 include_guard = "mozilla_wr_bindings_h"
+
+# Whether to add a `#pragma once` guard 
+# default: doesn't emit a `#pragma once`
+pragma_once = true
 
 # An optional string of text to output between major sections of the generated
 # file as a warning against manual editing
@@ -392,6 +455,8 @@ no_includes = false
 # default: false
 cpp_compat = false
 
+# A list of lines to add verbatim after the includes block
+after_includes = "#define VERSION 1"
 
 
 
@@ -423,7 +488,6 @@ tab_width = 3
 #
 # default: "auto"
 documentation_style = "doxy"
-
 
 
 
@@ -527,6 +591,14 @@ private:
   void cppMethod() const;
 """
 
+# Configuration for name mangling
+[export.mangle]
+# Whether the types should be renamed during mangling, for example
+# c_char -> CChar, etc.
+rename_types = "PascalCase"
+# Whether the underscores from the mangled name should be omitted.
+remove_underscores = false
+
 [layout]
 # A string that should come before the name of any type which has been marked
 # as `#[repr(packed)]`. For instance, "__attribute__((packed))" would be a
@@ -577,6 +649,13 @@ args = "horizontal"
 # default: nothing is emitted for must_use functions
 must_use = "MUST_USE_FUNC"
 
+# An optional string that will be used in the attribute position for functions
+# that don't return (that return `!` in Rust).
+#
+# For instance, `__attribute__((noreturn))` would be a reasonable value if
+# targeting gcc/clang.
+no_return = "NO_RETURN"
+
 # An optional string that, if present, will be used to generate Swift function
 # and method signatures for generated functions, for example "CF_SWIFT_NAME".
 # If no such macro is available in your toolchain, you can define one using the
@@ -604,13 +683,13 @@ swift_name_macro = "CF_SWIFT_NAME"
 # default: "None"
 rename_args = "PascalCase"
 
-# This rule specifies if the order of functions will be sorted in some way.
+# This rule specifies the order in which functions will be sorted.
 #
 # "Name": sort by the name of the function
 # "None": keep order in which the functions have been parsed
 #
-# default: "Name"
-sort_by = "None"
+# default: "None"
+sort_by = "Name"
 
 [struct]
 # A rule to use to rename struct field names. The renaming assumes the input is
@@ -806,6 +885,13 @@ allow_static_const = true
 # default: false
 allow_constexpr = false
 
+# This rule specifies the order in which constants will be sorted.
+#
+# "Name": sort by the name of the constant
+# "None": keep order in which the constants have been parsed
+#
+# default: "None"
+sort_by = "Name"
 
 
 
@@ -878,6 +964,12 @@ default_features = true
 #
 # default: []
 features = ["cbindgen"]
+
+[ptr]
+# An optional string to decorate all pointers that are
+# required to be non null. Nullability is inferred from the Rust type: `&T`,
+# `&mut T` and `NonNull<T>` all require a valid pointer value. 
+non_null_attribute = "_Nonnull"
 
 ```
 

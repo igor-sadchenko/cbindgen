@@ -5,8 +5,6 @@
 use std::collections::HashMap;
 use std::io::Write;
 
-use syn;
-
 use crate::bindgen::config::{Config, Language};
 use crate::bindgen::declarationtyperesolver::DeclarationTypeResolver;
 use crate::bindgen::dependencies::Dependencies;
@@ -68,8 +66,8 @@ impl Typedef {
         }
     }
 
-    pub fn simplify_standard_types(&mut self) {
-        self.aliased.simplify_standard_types();
+    pub fn simplify_standard_types(&mut self, config: &Config) {
+        self.aliased.simplify_standard_types(config);
     }
 
     pub fn transfer_annotations(&mut self, out: &mut HashMap<Path, AnnotationSet>) {
@@ -174,7 +172,12 @@ impl Item for Typedef {
             .zip(generic_values.iter())
             .collect::<Vec<_>>();
 
-        let mangled_path = mangle::mangle_path(&self.path, generic_values);
+        let mangled_path = mangle::mangle_path(
+            &self.path,
+            generic_values,
+            &library.get_config().export.mangle,
+        );
+
         let monomorph = Typedef::new(
             mangled_path,
             GenericParams::default(),

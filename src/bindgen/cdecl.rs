@@ -5,7 +5,7 @@
 use std::io::Write;
 
 use crate::bindgen::declarationtyperesolver::DeclarationType;
-use crate::bindgen::ir::{Function, Type};
+use crate::bindgen::ir::{ArrayLength, Function, Type};
 use crate::bindgen::writer::{ListType, SourceWriter};
 use crate::bindgen::{Config, Language};
 
@@ -14,8 +14,11 @@ use crate::bindgen::{Config, Language};
 // http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf
 
 enum CDeclarator {
-    Ptr(bool),
-    Ref,
+    Ptr {
+        is_const: bool,
+        is_nullable: bool,
+        is_ref: bool,
+    },
     Array(String),
     Func(Vec<(Option<String>, CDecl)>, bool),
 }
@@ -23,7 +26,7 @@ enum CDeclarator {
 impl CDeclarator {
     fn is_ptr(&self) -> bool {
         match self {
-            CDeclarator::Ptr(..) | CDeclarator::Ref | CDeclarator::Func(..) => true,
+            CDeclarator::Ptr { .. } | CDeclarator::Func(..) => true,
             _ => false,
         }
     }
@@ -53,6 +56,25 @@ impl CDecl {
         cdecl.build_type(t, false);
         cdecl
     }
+
+    fn from_func_arg(t: &Type, array_length: Option<&str>) -> CDecl {
+        let mut cdecl = CDecl::new();
+        let length = match array_length {
+            Some(l) => l,
+            None => return CDecl::from_type(t),
+        };
+        let (ty, is_const) = match t {
+            Type::Ptr { ty, is_const, .. } => (ty, is_const),
+            _ => unreachable!(
+                "Should never have an array length for a non pointer type {:?}",
+                t
+            ),
+        };
+        let ptr_as_array = Type::Array(ty.clone(), ArrayLength::Value(length.to_string()));
+        cdecl.build_type(&ptr_as_array, *is_const);
+        cdecl
+    }
+
     fn from_func(f: &Function, layout_vertical: bool) -> CDecl {
         let mut cdecl = CDecl::new();
         cdecl.build_func(f, layout_vertical);
@@ -63,7 +85,12 @@ impl CDecl {
         let args = f
             .args
             .iter()
-            .map(|&(ref arg_name, ref arg_ty)| (Some(arg_name.clone()), CDecl::from_type(arg_ty)))
+            .map(|arg| {
+                (
+                    arg.name.clone(),
+                    CDecl::from_func_arg(&arg.ty, arg.array_length.as_deref()),
+                )
+            })
             .collect();
         self.declarators
             .push(CDeclarator::Func(args, layout_vertical));
@@ -113,22 +140,18 @@ impl CDecl {
                 );
                 self.type_name = p.to_string();
             }
-
-            Type::ConstPtr(ref t) => {
-                self.declarators.push(CDeclarator::Ptr(is_const));
-                self.build_type(t, true);
-            }
-            Type::Ptr(ref t) => {
-                self.declarators.push(CDeclarator::Ptr(is_const));
-                self.build_type(t, false);
-            }
-            Type::Ref(ref t) => {
-                self.declarators.push(CDeclarator::Ref);
-                self.build_type(t, true);
-            }
-            Type::MutRef(ref t) => {
-                self.declarators.push(CDeclarator::Ref);
-                self.build_type(t, false);
+            Type::Ptr {
+                ref ty,
+                is_nullable,
+                is_const: ptr_is_const,
+                is_ref,
+            } => {
+                self.declarators.push(CDeclarator::Ptr {
+                    is_const,
+                    is_nullable: *is_nullable,
+                    is_ref: *is_ref,
+                });
+                self.build_type(ty, *ptr_is_const);
             }
             Type::Array(ref t, ref constant) => {
                 let len = constant.as_str().to_owned();
@@ -140,7 +163,11 @@ impl CDecl {
                     .iter()
                     .map(|(ref name, ref ty)| (name.clone(), CDecl::from_type(ty)))
                     .collect();
-                self.declarators.push(CDeclarator::Ptr(false));
+                self.declarators.push(CDeclarator::Ptr {
+                    is_const: false,
+                    is_nullable: true,
+                    is_ref: false,
+                });
                 self.declarators.push(CDeclarator::Func(args, false));
                 self.build_type(ret, false);
             }
@@ -178,15 +205,20 @@ impl CDecl {
             let next_is_pointer = iter_rev.peek().map_or(false, |x| x.is_ptr());
 
             match *declarator {
-                CDeclarator::Ptr(ref is_const) => {
-                    if *is_const {
-                        out.write("*const ");
-                    } else {
-                        out.write("*");
+                CDeclarator::Ptr {
+                    is_const,
+                    is_nullable,
+                    is_ref,
+                } => {
+                    out.write(if is_ref { "&" } else { "*" });
+                    if is_const {
+                        out.write("const ");
                     }
-                }
-                CDeclarator::Ref => {
-                    out.write("&");
+                    if !is_nullable && !is_ref {
+                        if let Some(attr) = &config.pointer.non_null_attribute {
+                            write!(out, "{} ", attr);
+                        }
+                    }
                 }
                 CDeclarator::Array(..) => {
                     if next_is_pointer {
@@ -213,10 +245,7 @@ impl CDecl {
         #[allow(clippy::while_let_on_iterator)]
         while let Some(declarator) = iter.next() {
             match *declarator {
-                CDeclarator::Ptr(..) => {
-                    last_was_pointer = true;
-                }
-                CDeclarator::Ref => {
+                CDeclarator::Ptr { .. } => {
                     last_was_pointer = true;
                 }
                 CDeclarator::Array(ref constant) => {
